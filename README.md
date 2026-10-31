@@ -87,7 +87,21 @@ npm run build
 npm start       # sirve API y frontend juntos en :3001
 ```
 
-### 4. Conectar el webhook
+### 4. Ver el panel antes de tener credenciales (opcional)
+
+Para evaluar la interfaz sin haber terminado el alta en Meta, carga datos de
+ejemplo (cinco conversaciones con adjuntos, etiquetas, reglas y una lista de
+difusión):
+
+```bash
+npm run dev            # déjalo arrancar una vez para crear la base de datos
+npm run seed:demo -w server
+```
+
+Es destructivo: vacía chats, contactos y reglas antes de escribir. No toca nada
+en WhatsApp, solo la base de datos local.
+
+### 5. Conectar el webhook
 
 Meta necesita alcanzar tu servidor por HTTPS desde internet. En local, abre un túnel:
 

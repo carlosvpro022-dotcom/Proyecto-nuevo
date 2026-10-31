@@ -18,6 +18,7 @@ export function MessageList({ conversationId }: { conversationId: number }) {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const lastCount = useRef(0);
   const pinnedToBottom = useRef(true);
 
@@ -39,10 +40,36 @@ export function MessageList({ conversationId }: { conversationId: number }) {
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ block: 'end' }));
   }, [conversationId]);
 
-  function onScroll() {
+  /*
+   * Las imágenes y los vídeos no tienen altura hasta que cargan, así que el
+   * primer scroll se queda corto. Observamos el alto real del contenido y
+   * volvemos a bajar mientras el usuario siga pegado al final.
+   */
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (pinnedToBottom.current) bottomRef.current?.scrollIntoView({ block: 'end' });
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [conversationId]);
+
+  /*
+   * El anclaje al final se decide por el gesto del usuario, no por la posición
+   * del scroll: al cargar una imagen el contenido crece de golpe y la posición
+   * mentiría durante unos milisegundos, desanclando la vista sin que nadie la
+   * haya tocado.
+   */
+  function onUserGesture() {
     const el = scrollRef.current;
     if (!el) return;
     pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  }
+
+  function onScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
     if (el.scrollTop < 80 && hasMore && !loading) {
       const prevHeight = el.scrollHeight;
       void loadOlder(conversationId).then(() => {
@@ -57,7 +84,15 @@ export function MessageList({ conversationId }: { conversationId: number }) {
   for (const m of messages) if (m.wamId) byWamId.set(m.wamId, m);
 
   return (
-    <div ref={scrollRef} onScroll={onScroll} className="chat-wallpaper min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-12">
+    <div
+      ref={scrollRef}
+      onScroll={onScroll}
+      onWheel={onUserGesture}
+      onTouchMove={onUserGesture}
+      onMouseDown={onUserGesture}
+      onKeyDown={onUserGesture}
+      className="chat-wallpaper min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-12"
+    >
       {hasMore && (
         <div className="mb-4 flex justify-center">
           <button
@@ -77,7 +112,7 @@ export function MessageList({ conversationId }: { conversationId: number }) {
         </div>
       )}
 
-      <div className="mx-auto flex max-w-4xl flex-col gap-2">
+      <div ref={contentRef} className="mx-auto flex max-w-4xl flex-col gap-2">
         {messages.map((m, i) => {
           const prev = messages[i - 1];
           const showDivider = !prev || !sameDay(prev.timestamp, m.timestamp);
