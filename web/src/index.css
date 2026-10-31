@@ -1,0 +1,107 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-wa-bg: #0b141a;
+  --color-wa-panel: #111b21;
+  --color-wa-surface: #202c33;
+  --color-wa-surface-2: #2a3942;
+  --color-wa-border: #222d34;
+  --color-wa-out: #005c4b;
+  --color-wa-in: #202c33;
+  --color-wa-accent: #00a884;
+  --color-wa-accent-strong: #25d366;
+  --color-wa-text: #e9edef;
+  --color-wa-muted: #8696a0;
+  --color-wa-blue: #53bdeb;
+  --font-sans: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+}
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #374248 transparent;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--color-wa-bg);
+    color: var(--color-wa-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #374248;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+  input:focus,
+  textarea:focus,
+  select:focus {
+    outline: none;
+  }
+}
+
+@utility chat-wallpaper {
+  background-color: var(--color-wa-bg);
+  background-image: radial-gradient(circle at 25% 15%, rgba(0, 168, 132, 0.06), transparent 45%),
+    radial-gradient(circle at 80% 85%, rgba(83, 189, 235, 0.05), transparent 45%);
+}
+
+/* Cola de la burbuja, como en WhatsApp. */
+@utility bubble-tail-out {
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: -7px;
+    width: 8px;
+    height: 13px;
+    background: var(--color-wa-out);
+    clip-path: polygon(0 0, 100% 0, 0 100%);
+  }
+}
+
+@utility bubble-tail-in {
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -7px;
+    width: 8px;
+    height: 13px;
+    background: var(--color-wa-in);
+    clip-path: polygon(0 0, 100% 0, 100% 100%);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@utility animate-fade-up {
+  animation: fade-up 0.18s ease-out;
+}
