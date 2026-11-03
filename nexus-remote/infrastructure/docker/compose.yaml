@@ -1,0 +1,93 @@
+# Despliegue de la infraestructura propia de NEXUS REMOTE.
+#
+#   cd infrastructure/docker
+#   cp .env.example .env     # y rellenelo
+#   docker compose up -d
+#
+# Tres servicios:
+#
+#   caddy      Proxy inverso. Es lo unico expuesto al 80 y al 443. Obtiene y
+#              renueva los certificados TLS solo, y termina el WebSocket de
+#              senalizacion.
+#   signaling  El servidor propio. No se publica ningun puerto: solo lo alcanza
+#              Caddy por la red interna.
+#   coturn     STUN y TURN. Necesita puertos propios y red de host para poder
+#              anunciar candidatos correctos.
+#
+# Los detalles de dominio, puertos y cortafuegos estan en
+# `docs/deployment/despliegue.md`.
+
+name: nexus-remote
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # Los certificados se comparten con Coturn, que los necesita para TURNS.
+      - caddy_data:/certificates:ro
+    environment:
+      NEXUS_DOMAIN: ${NEXUS_DOMAIN:?falta NEXUS_DOMAIN}
+      NEXUS_ACME_EMAIL: ${NEXUS_ACME_EMAIL:?falta NEXUS_ACME_EMAIL}
+    depends_on:
+      - signaling
+    networks:
+      - interna
+
+  signaling:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.signaling
+    restart: unless-stopped
+    # Sin `ports`: no se expone a Internet. Solo Caddy lo alcanza.
+    expose:
+      - "8443"
+    environment:
+      NEXUS_BIND_ADDRESS: 0.0.0.0:8443
+      NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:?falta NEXUS_PUBLIC_URL}
+      NEXUS_TURN_SHARED_SECRET: ${NEXUS_TURN_SHARED_SECRET:?falta NEXUS_TURN_SHARED_SECRET}
+      NEXUS_TURN_URLS: ${NEXUS_TURN_URLS:?falta NEXUS_TURN_URLS}
+      NEXUS_STUN_URLS: ${NEXUS_STUN_URLS:-}
+      NEXUS_CREDENTIAL_TTL_SECS: ${NEXUS_CREDENTIAL_TTL_SECS:-43200}
+      NEXUS_LOG: ${NEXUS_LOG:-info}
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - interna
+
+  coturn:
+    image: coturn/coturn:4.7-alpine
+    restart: unless-stopped
+    # Coturn necesita ver las direcciones reales para anunciar candidatos
+    # utiles. Con la red puenteada de Docker anunciaria la IP del contenedor,
+    # que no sirve desde Internet.
+    network_mode: host
+    volumes:
+      - ../turn/turnserver.conf.template:/etc/coturn/turnserver.conf.template:ro
+      - ./entrypoint-coturn.sh:/usr/local/bin/entrypoint-coturn.sh:ro
+      - caddy_data:/certs:ro
+      - ./certs:/etc/coturn/certs:ro
+    environment:
+      NEXUS_DOMAIN: ${NEXUS_DOMAIN:?falta NEXUS_DOMAIN}
+      NEXUS_TURN_SHARED_SECRET: ${NEXUS_TURN_SHARED_SECRET:?falta NEXUS_TURN_SHARED_SECRET}
+      NEXUS_TURN_MIN_PORT: ${NEXUS_TURN_MIN_PORT:-49160}
+      NEXUS_TURN_MAX_PORT: ${NEXUS_TURN_MAX_PORT:-49200}
+      NEXUS_EXTERNAL_IP: ${NEXUS_EXTERNAL_IP:-}
+    entrypoint: ["/usr/local/bin/entrypoint-coturn.sh"]
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  interna:
+    driver: bridge

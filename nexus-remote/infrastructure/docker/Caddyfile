@@ -1,0 +1,47 @@
+# Proxy inverso de NEXUS REMOTE.
+#
+# Caddy obtiene y renueva los certificados de Let's Encrypt solo, siempre que
+# el dominio apunte a esta maquina y los puertos 80 y 443 esten abiertos.
+#
+# Lo unico que se publica es el canal de senalizacion. No hay ninguna interfaz
+# administrativa expuesta.
+
+{
+	email {$NEXUS_ACME_EMAIL}
+	# Se desactiva la API de administracion de Caddy: no se usa y escucharia en
+	# el 2019 dentro del contenedor.
+	admin off
+}
+
+{$NEXUS_DOMAIN} {
+	encode zstd gzip
+
+	# Cabeceras de seguridad. El servicio no sirve paginas, pero si alguien
+	# apunta un navegador aqui conviene que no interprete nada.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Canal de senalizacion. Caddy conserva la conexion WebSocket y le anade
+	# TLS, que es lo que el servidor de senalizacion no hace por si mismo.
+	handle /signaling* {
+		reverse_proxy signaling:8443
+	}
+
+	# Sonda de salud e informacion del servicio.
+	handle /health {
+		reverse_proxy signaling:8443
+	}
+	handle /v1/* {
+		reverse_proxy signaling:8443
+	}
+
+	# Cualquier otra ruta no existe. No se revela que hay detras.
+	handle {
+		respond "Not Found" 404
+	}
+}

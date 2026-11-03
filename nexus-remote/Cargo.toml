@@ -1,0 +1,74 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/capture",
+    "crates/input",
+    "crates/transport",
+    "crates/security",
+    "crates/file-transfer",
+    "crates/audio",
+    "server/signaling",
+    "apps/windows-host/src-tauri",
+    "tests", "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "Proprietary"
+authors = ["NEXUS REMOTE"]
+repository = "https://github.com/carlosvpro022-dotcom/Proyecto-nuevo"
+publish = false
+
+[workspace.dependencies]
+# --- crates internos ---
+nexus-core = { path = "crates/core" }
+nexus-security = { path = "crates/security" }
+nexus-transport = { path = "crates/transport" }
+nexus-capture = { path = "crates/capture" }
+nexus-input = { path = "crates/input" }
+nexus-audio = { path = "crates/audio" }
+nexus-file-transfer = { path = "crates/file-transfer" }
+
+# Politica de lints comun a todo el workspace.
+#
+# `clippy::pedantic` esta activo a proposito: este codigo maneja criptografia y
+# red, y conviene que el compilador sea exigente. Lo que se desactiva, se
+# desactiva aqui una sola vez y con su motivo.
+[workspace.lints.rust]
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Casi todo son getters puros; marcar cada uno con #[must_use] solo anade ruido.
+must_use_candidate = "allow"
+# `session::SessionState` se reexporta en la raiz, donde el nombre completo si aporta.
+module_name_repetitions = "allow"
+# Las conversiones numericas estan acotadas en origen (resoluciones de pantalla,
+# milisegundos de una ventana de segundos) y comentadas en el punto de uso.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+# Las duraciones se expresan en la unidad que hace legible la relacion entre
+# ellas: una progresion 500/1000/2000 ms se lee mejor toda en milisegundos.
+duration_suboptimal_units = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1
+
+# El perfil que usa Tauri para los binarios distribuibles.
+[profile.dist]
+inherits = "release"
+debug = false

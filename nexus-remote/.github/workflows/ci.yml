@@ -1,0 +1,171 @@
+name: CI
+
+# Se ejecuta en cada cambio sobre el código de NEXUS REMOTE.
+on:
+  push:
+    paths: ["nexus-remote/**", ".github/workflows/ci.yml"]
+  pull_request:
+    paths: ["nexus-remote/**", ".github/workflows/ci.yml"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Las compilaciones de CI no necesitan información de depuración.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUSTFLAGS: "-D warnings"
+
+defaults:
+  run:
+    working-directory: nexus-remote
+
+jobs:
+  rust:
+    name: Rust · formato, lints y pruebas
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencias de Tauri
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libxdo-dev \
+            libayatana-appindicator3-dev libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nexus-remote
+
+      - name: Formato
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Pruebas
+        run: cargo test --workspace
+
+  panel:
+    name: Panel · tipos, compilación y render
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencias de Tauri
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libxdo-dev \
+            libayatana-appindicator3-dev libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nexus-remote
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: nexus-remote/apps/windows-host/package-lock.json
+
+      - name: Instalar dependencias del panel
+        working-directory: nexus-remote/apps/windows-host
+        run: npm ci
+
+      - name: Comprobar tipos
+        working-directory: nexus-remote/apps/windows-host
+        run: npm run typecheck
+
+      - name: Compilar el panel
+        working-directory: nexus-remote/apps/windows-host
+        run: npx vite build
+
+      - name: Instalar Playwright
+        working-directory: nexus-remote/apps/windows-host
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+
+      # Verifica que las 8 pantallas se dibujan con datos reales del backend.
+      - name: Render del panel
+        run: |
+          mkdir -p target
+          cargo run -q -p nexus-windows-host --example volcado_ui > target/panel-datos.json
+          NODE_PATH=apps/windows-host/node_modules \
+            node scripts/verificar-panel.mjs target/panel-datos.json
+
+      - name: Guardar las capturas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capturas-panel
+          path: nexus-remote/target/capturas-panel/
+          if-no-files-found: ignore
+
+  windows:
+    name: Windows · compilación nativa
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nexus-remote
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: nexus-remote/apps/windows-host/package-lock.json
+
+      - name: Instalar y compilar el panel
+        working-directory: nexus-remote/apps/windows-host
+        run: |
+          npm ci
+          npx vite build
+
+      # Es la comprobación que no se puede hacer desde Linux: que el host
+      # compila y pasa sus pruebas en el sistema para el que está pensado.
+      - name: Compilar el host
+        run: cargo build -p nexus-windows-host
+
+      - name: Pruebas en Windows
+        run: cargo test --workspace
+
+  infraestructura:
+    name: Infraestructura · validar la configuración
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar compose
+        working-directory: nexus-remote/infrastructure/docker
+        env:
+          NEXUS_DOMAIN: ejemplo.com
+          NEXUS_ACME_EMAIL: ci@ejemplo.com
+          NEXUS_PUBLIC_URL: wss://ejemplo.com/signaling
+          NEXUS_TURN_SHARED_SECRET: "0123456789012345678901234567890123456789"
+          NEXUS_TURN_URLS: turn:ejemplo.com:3478
+        run: docker compose -f compose.yaml config --quiet
+
+      - name: Validar el Caddyfile
+        working-directory: nexus-remote/infrastructure/docker
+        run: |
+          docker run --rm \
+            -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e NEXUS_DOMAIN=ejemplo.com \
+            -e NEXUS_ACME_EMAIL=ci@ejemplo.com \
+            caddy:2.10-alpine caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Comprobar la sintaxis de los guiones
+        working-directory: nexus-remote
+        run: |
+          sh -n infrastructure/docker/entrypoint-coturn.sh
+          bash -n scripts/preparar-entorno.sh
+          bash -n scripts/verificar.sh
+          bash -n scripts/servidor-local.sh

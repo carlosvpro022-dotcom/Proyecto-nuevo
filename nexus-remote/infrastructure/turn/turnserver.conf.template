@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# Coturn para NEXUS REMOTE
+#
+# Este archivo es una plantilla: `docker/entrypoint-coturn.sh` sustituye las
+# variables ${...} al arrancar el contenedor. No contiene ningun secreto.
+#
+# Decisiones y por que:
+#
+# - Credenciales temporales (`use-auth-secret`) en lugar de usuarios fijos. El
+#   servidor de senalizacion deriva usuario y contrasena del mismo secreto, con
+#   caducidad. Filtrar una credencial no da acceso permanente al relay.
+# - Sin `lt-cred-mech` con usuarios en archivo: no hay lista de usuarios que
+#   mantener ni que filtrar.
+# - IPs privadas y de bucle denegadas: impide usar el relay para alcanzar la
+#   red interna del servidor, que es el abuso clasico de un TURN abierto.
+# ---------------------------------------------------------------------------
+
+# --- Escucha ----------------------------------------------------------------
+listening-port=3478
+tls-listening-port=5349
+
+# Rango de puertos de retransmision. Debe coincidir con el publicado en Docker
+# y abierto en el cortafuegos.
+min-port=${NEXUS_TURN_MIN_PORT}
+max-port=${NEXUS_TURN_MAX_PORT}
+
+# IP publica anunciada en los candidatos. Imprescindible detras de NAT.
+external-ip=${NEXUS_EXTERNAL_IP}
+
+# --- Autenticacion ----------------------------------------------------------
+
+# Credenciales temporales derivadas por HMAC-SHA1 del secreto compartido.
+use-auth-secret
+static-auth-secret=${NEXUS_TURN_SHARED_SECRET}
+
+# El "reino" identifica el servicio en el protocolo. No es un secreto.
+realm=${NEXUS_DOMAIN}
+
+# --- TLS --------------------------------------------------------------------
+cert=/etc/coturn/certs/fullchain.pem
+pkey=/etc/coturn/certs/privkey.pem
+
+# Se desactivan los protocolos antiguos y los cifrados debiles.
+no-tlsv1
+no-tlsv1_1
+cipher-list="ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!MD5:!DSS"
+
+# --- Restricciones de uso ---------------------------------------------------
+
+# Sin multiplexado de relay entre pares distintos.
+no-multicast-peers
+
+# Se impide que el relay alcance redes privadas o de bucle: un TURN que puede
+# hablar con 127.0.0.1 o con 10.0.0.0/8 se convierte en un salto hacia la red
+# interna del servidor.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# Sin consola de administracion: una interfaz administrativa en Internet es
+# superficie de ataque que este despliegue no necesita.
+no-cli
+
+# Cuotas, para que un solo par no agote el servidor.
+user-quota=12
+total-quota=1200
+
+# --- Registro ---------------------------------------------------------------
+log-file=stdout
+simple-log
+# No se registran las credenciales derivadas.
+no-stdout-log=false

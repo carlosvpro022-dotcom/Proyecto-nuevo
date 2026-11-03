@@ -1,0 +1,68 @@
+# Imagen del servidor de senalizacion.
+#
+# Dos etapas: se compila con la imagen de Rust y se ejecuta sobre una base
+# minima de Debian. La imagen final no lleva compilador ni codigo fuente.
+
+# --- compilacion ------------------------------------------------------------
+FROM rust:1.90-bookworm AS builder
+
+WORKDIR /build
+
+# Primero solo los manifiestos, para que la capa de dependencias se reutilice
+# mientras no cambien. Sin esto, cada cambio de codigo recompila todo.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/core/Cargo.toml                 crates/core/
+COPY crates/capture/Cargo.toml              crates/capture/
+COPY crates/input/Cargo.toml                crates/input/
+COPY crates/transport/Cargo.toml            crates/transport/
+COPY crates/security/Cargo.toml             crates/security/
+COPY crates/file-transfer/Cargo.toml        crates/file-transfer/
+COPY crates/audio/Cargo.toml                crates/audio/
+COPY server/signaling/Cargo.toml            server/signaling/
+
+# El host de Windows y las pruebas de integracion no forman parte de esta
+# imagen: se excluyen del workspace para no arrastrar Tauri ni SQLite.
+RUN sed -i '/apps\/windows-host\/src-tauri/d; /"tests",/d' Cargo.toml
+
+# Esqueletos para que `cargo build` resuelva y compile las dependencias.
+RUN for crate in crates/core crates/capture crates/input crates/transport \
+                 crates/security crates/file-transfer crates/audio; do \
+        mkdir -p "$crate/src" && echo "" > "$crate/src/lib.rs"; \
+    done && \
+    mkdir -p server/signaling/src && \
+    echo "fn main() {}" > server/signaling/src/main.rs && \
+    cargo build --release -p nexus-signaling && \
+    rm -rf crates/*/src server/signaling/src
+
+# Ahora el codigo de verdad.
+COPY crates/ crates/
+COPY server/signaling/ server/signaling/
+
+# `touch` fuerza la recompilacion de los crates propios, no de las dependencias.
+RUN find crates server -name '*.rs' -exec touch {} + && \
+    cargo build --release -p nexus-signaling && \
+    strip target/release/nexus-signaling
+
+# --- ejecucion --------------------------------------------------------------
+FROM debian:bookworm-slim
+
+# `ca-certificates` hace falta para validar TLS de salida; `curl` para la sonda
+# de salud del contenedor.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# El servicio no corre como root: si alguien lograra ejecutar codigo dentro del
+# contenedor, no tendria privilegios.
+RUN useradd --system --create-home --uid 10001 nexus
+USER nexus
+WORKDIR /home/nexus
+
+COPY --from=builder /build/target/release/nexus-signaling /usr/local/bin/nexus-signaling
+
+EXPOSE 8443
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8443/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/nexus-signaling"]

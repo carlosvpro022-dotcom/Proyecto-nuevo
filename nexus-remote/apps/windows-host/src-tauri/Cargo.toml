@@ -1,0 +1,41 @@
+[package]
+name = "nexus-windows-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nexus_windows_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-host"
+path = "src/main.rs"
+
+[dependencies]
+nexus-capture = { version = "0.1.0", path = "../../../crates/capture" }
+nexus-core = { version = "0.1.0", path = "../../../crates/core" }
+nexus-file-transfer = { version = "0.1.0", path = "../../../crates/file-transfer" }
+nexus-input = { version = "0.1.0", path = "../../../crates/input" }
+nexus-security = { version = "0.1.0", path = "../../../crates/security" }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sysinfo = "0.38.4"
+tauri = "2.12.5"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = "2.7.4"

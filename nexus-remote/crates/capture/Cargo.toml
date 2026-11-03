@@ -1,0 +1,12 @@
+[package]
+name = "nexus-capture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nexus-core = { version = "0.1.0", path = "../core" }
+serde = "1.0.229"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

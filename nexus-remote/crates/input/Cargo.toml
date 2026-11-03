@@ -1,0 +1,11 @@
+[package]
+name = "nexus-input"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nexus-core = { version = "0.1.0", path = "../core" }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "nexus-security"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argon2 = "0.6.0"
+base64 = "0.23.1"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "serde", "zeroize"] }
+hex = "0.4.3"
+nexus-core = { version = "0.1.0", path = "../core" }
+rand = "0.10.3"
+rand_core = "0.10.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+subtle = "2.6.1"
+thiserror = "2.0.21"
+zeroize = "1.9.1"
+
+[dev-dependencies]
+serde_json = "1.0.154"
+uuid = { version = "1.29.0", features = ["v4"] }
+
+[lints]
+workspace = true

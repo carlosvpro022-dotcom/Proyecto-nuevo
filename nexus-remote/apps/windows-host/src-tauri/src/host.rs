@@ -1,0 +1,798 @@
+//! Servicio del host: lo que la interfaz puede pedir y el host sabe hacer.
+//!
+//! Reune la identidad, el almacen local y el flujo de emparejamiento en un solo
+//! objeto con estado. La interfaz no habla nunca directamente con `SQLite` ni con
+//! la capa de criptografia: pasa por aqui, y aqui se aplican las reglas.
+//!
+//! # Lo que ya funciona
+//!
+//! - Identidad del host persistente entre arranques.
+//! - Emparejamiento completo: abrir, mostrar codigo y QR, canjear, caducar,
+//!   cancelar, con limite de intentos.
+//! - Lista de dispositivos autorizados, con revocacion y borrado.
+//! - Autenticacion de un dispositivo ya emparejado contra el almacen `SQLite`.
+//! - Informacion real del equipo.
+//!
+//! # Lo que falta
+//!
+//! - Enumeracion de monitores y captura: etapa 2 (devuelve error explicito en
+//!   las plataformas sin backend).
+//! - Conexion con el servidor de senalizacion y sesiones remotas: etapa 3.
+
+use std::path::Path;
+use std::time::Duration;
+
+use nexus_core::{DeviceId, DeviceInfo, DevicePlatform, DeviceRole, PermissionSet, Timestamp};
+use nexus_security::identity::DevicePublicKey;
+use nexus_security::pairing::{DEFAULT_PAIRING_TTL, PairingInvite};
+use nexus_security::registry::DeviceRecord;
+use nexus_security::{DeviceIdentity, PairingCode, PairingSession};
+
+use crate::error::{HostError, HostResult};
+use crate::store::Store;
+
+/// Clave del ajuste que guarda la URL del servidor de senalizacion.
+pub const SETTING_SIGNALING_URL: &str = "signaling_url";
+
+/// Emparejamiento abierto, con el codigo en claro para poder mostrarlo.
+///
+/// El codigo vive aqui, en memoria, solo mientras el emparejamiento esta
+/// abierto. Al cerrarse se descarta.
+#[derive(Debug)]
+struct OpenPairing {
+    session: PairingSession,
+    code: PairingCode,
+}
+
+/// Servicio del host.
+pub struct HostService {
+    identity: DeviceIdentity,
+    store: Store,
+    pairing: Option<OpenPairing>,
+}
+
+impl HostService {
+    /// Arranca el servicio sobre un directorio de datos.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Io`] si el directorio no es utilizable,
+    /// [`HostError::Database`] si la base de datos no se puede abrir.
+    pub fn open(data_dir: &Path) -> HostResult<Self> {
+        let identity = crate::identity::load_or_create(data_dir)?;
+        let store = Store::open(&data_dir.join("nexus-host.db"))?;
+        Ok(Self {
+            identity,
+            store,
+            pairing: None,
+        })
+    }
+
+    /// Arranca el servicio con todo en memoria. Para pruebas.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Database`] si la base en memoria no se puede crear.
+    pub fn open_ephemeral(identity: DeviceIdentity) -> HostResult<Self> {
+        Ok(Self {
+            identity,
+            store: Store::open_in_memory()?,
+            pairing: None,
+        })
+    }
+
+    /// Identificador del host.
+    #[must_use]
+    pub const fn device_id(&self) -> DeviceId {
+        self.identity.device_id()
+    }
+
+    /// Clave publica del host.
+    #[must_use]
+    pub fn public_key(&self) -> DevicePublicKey {
+        self.identity.public_key()
+    }
+
+    /// Acceso de lectura al almacen.
+    #[must_use]
+    pub const fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Datos que el host declara sobre si mismo.
+    #[must_use]
+    pub fn describe_self(&self) -> DeviceInfo {
+        let status = crate::system::read_status();
+        DeviceInfo {
+            id: self.identity.device_id(),
+            display_name: status.hostname,
+            platform: host_platform(),
+            role: DeviceRole::Host,
+            os_version: status.os_description,
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
+    }
+
+    /// Abre un emparejamiento y devuelve el codigo a mostrar.
+    ///
+    /// Si ya habia uno abierto, se cancela: no puede haber dos codigos validos
+    /// a la vez, porque entonces no quedaria claro cual se esta canjeando.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Security`] si la derivacion del codigo falla.
+    pub fn open_pairing(
+        &mut self,
+        permissions: PermissionSet,
+        unattended_access: bool,
+        now: Timestamp,
+    ) -> HostResult<(PairingSession, PairingCode)> {
+        self.cancel_pairing();
+
+        let (session, code) = PairingSession::open(
+            self.identity.device_id(),
+            permissions,
+            unattended_access,
+            DEFAULT_PAIRING_TTL,
+            now,
+        )?;
+
+        self.pairing = Some(OpenPairing {
+            session: session.clone(),
+            code: code.clone(),
+        });
+        tracing::info!(pairing_id = %session.id, "emparejamiento abierto");
+        Ok((session, code))
+    }
+
+    /// Emparejamiento abierto, si lo hay y sigue vigente.
+    pub fn current_pairing(&mut self, now: Timestamp) -> Option<&PairingSession> {
+        if let Some(open) = self.pairing.as_mut()
+            && open.session.expire_if_due(now)
+        {
+            tracing::info!(pairing_id = %open.session.id, "el codigo de emparejamiento caduco");
+        }
+        self.pairing.as_ref().map(|open| &open.session)
+    }
+
+    /// Codigo del emparejamiento abierto, para mostrarlo en pantalla.
+    pub fn current_code(&mut self, now: Timestamp) -> Option<PairingCode> {
+        let valid = self
+            .current_pairing(now)
+            .is_some_and(|s| s.is_usable_at(now));
+        if !valid {
+            return None;
+        }
+        self.pairing.as_ref().map(|open| open.code.clone())
+    }
+
+    /// Invitacion lista para pintarla en un QR.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::NoPairingOpen`] si no hay emparejamiento vigente.
+    pub fn current_invite(&mut self, now: Timestamp) -> HostResult<PairingInvite> {
+        let signaling_url = self
+            .store
+            .get_setting(SETTING_SIGNALING_URL)?
+            .unwrap_or_else(|| "wss://sin-configurar/signaling".to_owned());
+
+        let code = self.current_code(now).ok_or(HostError::NoPairingOpen)?;
+        let session = self.pairing.as_ref().ok_or(HostError::NoPairingOpen)?;
+        let host_key = self.identity.public_key();
+
+        Ok(PairingInvite::new(
+            signaling_url,
+            &session.session,
+            &code,
+            &host_key,
+        ))
+    }
+
+    /// Cancela el emparejamiento abierto. Devuelve `true` si habia uno.
+    pub fn cancel_pairing(&mut self) -> bool {
+        match self.pairing.take() {
+            Some(mut open) => {
+                open.session.cancel();
+                tracing::info!(pairing_id = %open.session.id, "emparejamiento cancelado");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Canjea el codigo y registra el dispositivo nuevo.
+    ///
+    /// Es la operacion que convierte un dispositivo desconocido en autorizado.
+    /// El codigo se comprueba con Argon2id y se consume: aunque sea correcto, no
+    /// sirve dos veces.
+    ///
+    /// # Errors
+    ///
+    /// - [`HostError::NoPairingOpen`] si no hay emparejamiento abierto.
+    /// - [`HostError::Security`] si el codigo no coincide, caduco, o se agotaron
+    ///   los intentos.
+    /// - [`HostError::InvalidInput`] si la clave publica recibida no es valida.
+    pub fn redeem_pairing(
+        &mut self,
+        typed_code: &str,
+        info: DeviceInfo,
+        public_key_hex: &str,
+        now: Timestamp,
+    ) -> HostResult<DeviceRecord> {
+        let public_key = DevicePublicKey::from_hex(public_key_hex)?;
+
+        // No se pre-caduca el emparejamiento: `PairingSession::redeem` ya
+        // comprueba la ventana antes de gastar un intento y devuelve
+        // `PairingCodeExpired`, que es mas util que un `PairingNotActive`.
+        let open = self.pairing.as_mut().ok_or(HostError::NoPairingOpen)?;
+
+        let candidate = PairingCode::parse(typed_code)?;
+        open.session.redeem(&candidate, now)?;
+
+        let record = DeviceRecord::new(
+            info,
+            public_key,
+            open.session.permissions.clone(),
+            open.session.unattended_access,
+            now,
+        );
+        let device_id = record.info.id;
+        self.store.save_device(device_id, &record)?;
+        self.pairing = None;
+
+        tracing::info!(
+            %device_id,
+            fingerprint = %record.public_key.short_fingerprint(),
+            "dispositivo emparejado"
+        );
+        Ok(record)
+    }
+
+    /// Lista los dispositivos autorizados.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Database`] si la lectura falla.
+    pub fn list_devices(&self) -> HostResult<Vec<DeviceRecord>> {
+        Ok(self
+            .store
+            .list_devices()?
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect())
+    }
+
+    /// Revoca un dispositivo.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::UnknownDevice`] si no existe.
+    pub fn revoke_device(&mut self, device_id: DeviceId, now: Timestamp) -> HostResult<()> {
+        if self.store.load_device(device_id)?.is_none() {
+            return Err(HostError::UnknownDevice {
+                id: device_id.to_string(),
+            });
+        }
+        if self.store.revoke_device(device_id, now)? {
+            tracing::warn!(%device_id, "dispositivo revocado");
+        }
+        Ok(())
+    }
+
+    /// Borra un dispositivo y su historial.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::UnknownDevice`] si no existe.
+    pub fn delete_device(&mut self, device_id: DeviceId) -> HostResult<()> {
+        if self.store.delete_device(device_id)? {
+            tracing::warn!(%device_id, "dispositivo borrado");
+            Ok(())
+        } else {
+            Err(HostError::UnknownDevice {
+                id: device_id.to_string(),
+            })
+        }
+    }
+
+    /// Cambia los permisos de un dispositivo.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::UnknownDevice`] si no existe.
+    pub fn set_device_permissions(
+        &mut self,
+        device_id: DeviceId,
+        permissions: PermissionSet,
+    ) -> HostResult<DeviceRecord> {
+        let mut record =
+            self.store
+                .load_device(device_id)?
+                .ok_or_else(|| HostError::UnknownDevice {
+                    id: device_id.to_string(),
+                })?;
+        record.permissions = permissions;
+        self.store.save_device(device_id, &record)?;
+        Ok(record)
+    }
+
+    /// Guarda la URL del servidor de senalizacion.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::InvalidInput`] si la URL no usa `wss://`, y
+    /// [`HostError::Database`] si la escritura falla.
+    pub fn set_signaling_url(&self, url: &str) -> HostResult<()> {
+        let trimmed = url.trim();
+        // Se exige `wss://`: senalizacion en claro expondria los
+        // identificadores de los dispositivos y los candidatos ICE.
+        if !trimmed.starts_with("wss://") {
+            return Err(HostError::InvalidInput(
+                "la URL de senalizacion debe empezar por wss:// (TLS obligatorio)".to_owned(),
+            ));
+        }
+        self.store.set_setting(SETTING_SIGNALING_URL, trimmed)
+    }
+
+    /// URL del servidor de senalizacion, si esta configurada.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Database`] si la lectura falla.
+    pub fn signaling_url(&self) -> HostResult<Option<String>> {
+        self.store.get_setting(SETTING_SIGNALING_URL)
+    }
+
+    /// Enumera los monitores del host.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Capture`] con
+    /// [`CaptureError::UnsupportedPlatform`](nexus_capture::CaptureError::UnsupportedPlatform)
+    /// mientras no exista el backend de Windows (etapa 2).
+    pub fn list_monitors(&self) -> HostResult<nexus_core::MonitorLayout> {
+        use nexus_capture::ScreenCapturer;
+        Ok(nexus_capture::UnsupportedCapturer.enumerate_monitors()?)
+    }
+}
+
+/// Plataforma en la que corre este binario.
+const fn host_platform() -> DevicePlatform {
+    if cfg!(windows) {
+        DevicePlatform::Windows
+    } else if cfg!(target_os = "linux") {
+        DevicePlatform::Linux
+    } else {
+        DevicePlatform::Unknown
+    }
+}
+
+/// Validez del codigo de emparejamiento, expuesta para la interfaz.
+#[must_use]
+pub const fn pairing_ttl() -> Duration {
+    DEFAULT_PAIRING_TTL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexus_security::SecurityError;
+    use nexus_security::pairing::PairingState;
+
+    const NOW: Timestamp = Timestamp(1_730_000_000_000);
+
+    fn service() -> HostService {
+        HostService::open_ephemeral(DeviceIdentity::generate(DeviceId::new()))
+            .expect("servicio en memoria")
+    }
+
+    fn controller() -> (DeviceIdentity, DeviceInfo) {
+        let identity = DeviceIdentity::generate(DeviceId::new());
+        let info = DeviceInfo {
+            id: identity.device_id(),
+            display_name: "iPad Pro".to_owned(),
+            platform: DevicePlatform::IpadOs,
+            role: DeviceRole::Controller,
+            os_version: "18.1".to_owned(),
+            app_version: "0.1.0".to_owned(),
+        };
+        (identity, info)
+    }
+
+    #[test]
+    fn a_fresh_host_has_no_devices_and_no_pairing() {
+        let mut host = service();
+        assert!(host.list_devices().expect("lista").is_empty());
+        assert!(host.current_pairing(NOW).is_none());
+        assert!(host.current_code(NOW).is_none());
+    }
+
+    #[test]
+    fn the_host_describes_itself_with_real_data() {
+        let host = service();
+        let info = host.describe_self();
+        assert_eq!(info.role, DeviceRole::Host);
+        assert_eq!(info.id, host.device_id());
+        assert!(!info.display_name.is_empty());
+        assert!(!info.os_version.is_empty());
+    }
+
+    #[test]
+    fn an_expired_pairing_reports_expiry_not_a_generic_refusal() {
+        // El mensaje importa: "el codigo caduco" le dice a la persona que
+        // genere otro; "no esta activo" no le dice nada.
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+        let too_late = Timestamp(NOW.0 + DEFAULT_PAIRING_TTL.as_millis() as u64);
+
+        let err = host
+            .redeem_pairing(
+                code.as_str(),
+                info,
+                &identity.public_key().to_hex(),
+                too_late,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, HostError::Security(SecurityError::PairingCodeExpired)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn opening_a_pairing_produces_a_showable_code() {
+        let mut host = service();
+        let (session, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+
+        assert_eq!(session.state, PairingState::Active);
+        assert_eq!(code.as_str().len(), 8);
+        assert_eq!(code.grouped().len(), 9, "formato XXXX-XXXX");
+        assert_eq!(
+            host.current_code(NOW).map(|c| c.as_str().to_owned()),
+            Some(code.as_str().to_owned())
+        );
+    }
+
+    #[test]
+    fn opening_a_second_pairing_replaces_the_first() {
+        let mut host = service();
+        let (_, first) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (_, second) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        assert_ne!(first.as_str(), second.as_str());
+
+        // El primer codigo ya no sirve: solo hay un emparejamiento vigente.
+        let (_, info) = controller();
+        let identity = DeviceIdentity::generate(info.id);
+        let err = host
+            .redeem_pairing(first.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .unwrap_err();
+        assert!(
+            matches!(err, HostError::Security(SecurityError::PairingCodeMismatch)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_right_code_registers_the_device() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+
+        let record = host
+            .redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .expect("empareja");
+
+        assert_eq!(record.public_key, identity.public_key());
+        assert_eq!(record.permissions, PermissionSet::standard());
+        assert_eq!(host.list_devices().expect("lista").len(), 1);
+        assert!(
+            host.current_pairing(NOW).is_none(),
+            "el emparejamiento se consume"
+        );
+    }
+
+    #[test]
+    fn a_grouped_code_typed_by_hand_also_works() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::view_only(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+
+        // Tal como lo teclearia la persona en el iPad.
+        let typed = code.grouped().to_lowercase();
+        host.redeem_pairing(&typed, info, &identity.public_key().to_hex(), NOW)
+            .expect("debe aceptar el formato con guion y en minusculas");
+    }
+
+    #[test]
+    fn the_granted_permissions_are_the_ones_chosen_when_opening() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::view_only(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+
+        let record = host
+            .redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .expect("empareja");
+        assert_eq!(record.permissions, PermissionSet::view_only());
+        assert!(!record.unattended_access);
+    }
+
+    #[test]
+    fn a_wrong_code_does_not_register_anything() {
+        let mut host = service();
+        host.open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+
+        let err = host
+            .redeem_pairing("ZZZZ9999", info, &identity.public_key().to_hex(), NOW)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HostError::Security(SecurityError::PairingCodeMismatch)
+        ));
+        assert!(host.list_devices().expect("lista").is_empty());
+    }
+
+    #[test]
+    fn redeeming_without_an_open_pairing_fails() {
+        let mut host = service();
+        let (identity, info) = controller();
+        let err = host
+            .redeem_pairing("ABCD2345", info, &identity.public_key().to_hex(), NOW)
+            .unwrap_err();
+        assert!(matches!(err, HostError::NoPairingOpen), "{err:?}");
+    }
+
+    #[test]
+    fn an_expired_code_is_refused_and_registers_nothing() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+
+        let too_late = Timestamp(NOW.0 + DEFAULT_PAIRING_TTL.as_millis() as u64 + 1);
+        let err = host
+            .redeem_pairing(
+                code.as_str(),
+                info,
+                &identity.public_key().to_hex(),
+                too_late,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, HostError::Security(SecurityError::PairingCodeExpired)),
+            "{err:?}"
+        );
+        assert!(host.list_devices().expect("lista").is_empty());
+        assert!(host.current_code(too_late).is_none());
+    }
+
+    #[test]
+    fn an_invalid_public_key_is_refused_before_spending_an_attempt() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (_, info) = controller();
+
+        assert!(
+            host.redeem_pairing(code.as_str(), info.clone(), "no-es-hex", NOW)
+                .is_err()
+        );
+        assert!(
+            host.redeem_pairing(code.as_str(), info, &"00".repeat(32), NOW)
+                .is_err(),
+            "una clave de orden pequeno no debe registrarse"
+        );
+
+        // El codigo correcto sigue valiendo: no se consumio intento.
+        let (identity, info) = controller();
+        host.redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .expect("el emparejamiento seguia vivo");
+    }
+
+    #[test]
+    fn cancelling_a_pairing_invalidates_the_code() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        assert!(host.cancel_pairing());
+        assert!(!host.cancel_pairing(), "ya no habia ninguno");
+
+        let (identity, info) = controller();
+        let err = host
+            .redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .unwrap_err();
+        assert!(matches!(err, HostError::NoPairingOpen));
+    }
+
+    #[test]
+    fn the_invite_carries_everything_the_qr_needs() {
+        let mut host = service();
+        host.set_signaling_url("wss://nexus.example/signaling")
+            .expect("guarda URL");
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+
+        let invite = host.current_invite(NOW).expect("invitacion");
+        assert_eq!(invite.signaling_url, "wss://nexus.example/signaling");
+        assert_eq!(invite.host_id, host.device_id());
+        assert_eq!(invite.code, code.as_str());
+        assert_eq!(
+            invite.host_fingerprint,
+            host.public_key().short_fingerprint()
+        );
+
+        // Y sobrevive al viaje por el QR.
+        let json = invite.to_json().expect("serializa");
+        let back = PairingInvite::from_json(&json).expect("deserializa");
+        assert_eq!(back, invite);
+    }
+
+    #[test]
+    fn there_is_no_invite_without_an_open_pairing() {
+        let mut host = service();
+        assert!(matches!(
+            host.current_invite(NOW).unwrap_err(),
+            HostError::NoPairingOpen
+        ));
+    }
+
+    #[test]
+    fn revoking_a_device_keeps_it_listed_but_inactive() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+        let record = host
+            .redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .expect("empareja");
+
+        host.revoke_device(record.info.id, Timestamp(NOW.0 + 10))
+            .expect("revoca");
+        let devices = host.list_devices().expect("lista");
+        assert_eq!(
+            devices.len(),
+            1,
+            "queda en la lista para que se vea el historial"
+        );
+        assert!(!devices[0].is_active());
+    }
+
+    #[test]
+    fn revoking_or_deleting_an_unknown_device_is_reported() {
+        let mut host = service();
+        let ghost = DeviceId::new();
+        assert!(matches!(
+            host.revoke_device(ghost, NOW).unwrap_err(),
+            HostError::UnknownDevice { .. }
+        ));
+        assert!(matches!(
+            host.delete_device(ghost).unwrap_err(),
+            HostError::UnknownDevice { .. }
+        ));
+    }
+
+    #[test]
+    fn deleting_a_device_removes_it_from_the_list() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::standard(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+        let record = host
+            .redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .expect("empareja");
+
+        host.delete_device(record.info.id).expect("borra");
+        assert!(host.list_devices().expect("lista").is_empty());
+    }
+
+    #[test]
+    fn permissions_can_be_changed_after_pairing() {
+        let mut host = service();
+        let (_, code) = host
+            .open_pairing(PermissionSet::view_only(), false, NOW)
+            .expect("abre");
+        let (identity, info) = controller();
+        let record = host
+            .redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+            .expect("empareja");
+
+        let updated = host
+            .set_device_permissions(record.info.id, PermissionSet::standard())
+            .expect("cambia permisos");
+        assert_eq!(updated.permissions, PermissionSet::standard());
+
+        let reloaded = &host.list_devices().expect("lista")[0];
+        assert_eq!(reloaded.permissions, PermissionSet::standard());
+    }
+
+    #[test]
+    fn the_signaling_url_must_use_tls() {
+        let host = service();
+        assert!(host.signaling_url().expect("lee").is_none());
+
+        for bad in [
+            "ws://nexus.example",
+            "http://nexus.example",
+            "nexus.example",
+        ] {
+            assert!(
+                host.set_signaling_url(bad).is_err(),
+                "{bad} no deberia aceptarse sin TLS"
+            );
+        }
+
+        host.set_signaling_url("  wss://nexus.example/signaling  ")
+            .expect("acepta wss");
+        assert_eq!(
+            host.signaling_url().expect("lee").as_deref(),
+            Some("wss://nexus.example/signaling"),
+            "debe guardarse recortada"
+        );
+    }
+
+    #[test]
+    fn monitor_enumeration_reports_the_missing_backend() {
+        let host = service();
+        let err = host.list_monitors().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                HostError::Capture(nexus_capture::CaptureError::UnsupportedPlatform { .. })
+            ),
+            "mientras no haya backend debe decirlo claramente: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_opened_on_disk_keeps_its_devices_across_restarts() {
+        let temp = tempfile::tempdir().expect("temporal");
+
+        let device_id = {
+            let mut host = HostService::open(temp.path()).expect("abre");
+            let (_, code) = host
+                .open_pairing(PermissionSet::standard(), false, NOW)
+                .expect("abre");
+            let (identity, info) = controller();
+            host.redeem_pairing(code.as_str(), info, &identity.public_key().to_hex(), NOW)
+                .expect("empareja")
+                .info
+                .id
+        };
+
+        let host = HostService::open(temp.path()).expect("reabre");
+        let devices = host.list_devices().expect("lista");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].info.id, device_id);
+    }
+
+    #[test]
+    fn the_host_identity_is_stable_across_restarts() {
+        let temp = tempfile::tempdir().expect("temporal");
+        let first = HostService::open(temp.path()).expect("abre").public_key();
+        let second = HostService::open(temp.path()).expect("reabre").public_key();
+        assert_eq!(first, second);
+    }
+}

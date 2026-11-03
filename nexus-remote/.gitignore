@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+apps/windows-host/dist/
+
+# Tauri
+apps/windows-host/src-tauri/gen/
+
+# Secretos del despliegue. NUNCA deben subirse.
+infrastructure/docker/.env
+infrastructure/docker/certs/
+
+# Datos locales del host (identidad y base de datos)
+*.db
+*.db-shm
+*.db-wal
+host-identity.key
+host-identity.id
+
+# Sistema
+.DS_Store
+Thumbs.db
