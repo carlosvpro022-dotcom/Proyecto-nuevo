@@ -63,6 +63,18 @@ pub enum SecurityError {
     /// Fallo al derivar o verificar un hash de contrasena.
     #[error("fallo en la funcion de derivacion: {0}")]
     HashFailure(String),
+
+    /// La huella del certificado DTLS no tiene un formato admitido.
+    #[error("huella DTLS invalida: {0}")]
+    InvalidFingerprint(String),
+
+    /// La firma del otro extremo cubre una huella DTLS distinta de la que se
+    /// negocio de verdad.
+    ///
+    /// Es la senal de que alguien intercepto la senalizacion y sustituyo la
+    /// huella para colocarse en medio de la sesion. La sesion se aborta.
+    #[error("la huella DTLS firmada no coincide con la negociada: posible interceptacion")]
+    FingerprintMismatch,
 }
 
 /// Resultado corto del crate.

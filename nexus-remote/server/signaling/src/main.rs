@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use nexus_signaling::{AppState, Config, routes};
+use nexus_signaling::{AppState, Config, serve};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -33,12 +33,7 @@ async fn main() -> std::process::ExitCode {
         stun_servers = config.stun_urls.len(),
         "arrancando NEXUS REMOTE signaling"
     );
-    tracing::warn!(
-        "el canal /v1/signaling aun no esta implementado (etapa 3); solo responden /health y /v1/info"
-    );
-
     let state = Arc::new(AppState::new(config));
-    let app = routes::router(state);
 
     let listener = match tokio::net::TcpListener::bind(bind_address).await {
         Ok(listener) => listener,
@@ -48,9 +43,7 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let result = serve(listener, state, shutdown_signal()).await;
 
     match result {
         Ok(()) => {

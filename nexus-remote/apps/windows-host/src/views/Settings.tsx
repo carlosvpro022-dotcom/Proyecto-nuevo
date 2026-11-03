@@ -2,22 +2,30 @@
 
 import { useState } from "react";
 
-import type { HostSummary } from "../api";
+import type { HostSummary, SignalingProbe } from "../api";
 import { Card, Notice } from "../components/ui";
 
 export function Settings({
   summary,
   onSaveSignalingUrl,
+  onCheckSignaling,
+  probe,
+  checking,
   busy,
   error,
 }: {
   summary: HostSummary;
   onSaveSignalingUrl: (url: string) => void;
+  onCheckSignaling: (enrollmentToken: string) => void;
+  probe: SignalingProbe | null;
+  checking: boolean;
   busy: boolean;
   error: string | null;
 }) {
   const [url, setUrl] = useState(summary.signalingUrl ?? "");
+  const [token, setToken] = useState("");
   const dirty = url.trim() !== (summary.signalingUrl ?? "");
+  const configured = (summary.signalingUrl ?? "").length > 0;
 
   return (
     <div className="stack">
@@ -34,7 +42,7 @@ export function Settings({
             className="input"
             type="text"
             value={url}
-            placeholder="wss://nexus.midominio.com/signaling"
+            placeholder="wss://nexus.midominio.com/v1/signaling"
             spellCheck={false}
             onChange={(event) => setUrl(event.target.value)}
           />
@@ -72,7 +80,84 @@ export function Settings({
         </div>
       </Card>
 
-      <Card title="Calidad de transmision" hint="Se aplicara cuando exista la sesion remota (etapa 3).">
+      <Card
+        title="Comprobar la conexion"
+        hint="Se conecta de verdad al servidor, se autentica y se declara disponible. No deja la conexion abierta."
+      >
+        {!configured && (
+          <Notice tone="warn">
+            Primero hay que guardar la direccion del servidor.
+          </Notice>
+        )}
+
+        <div className="field" style={{ maxWidth: 560 }}>
+          <label className="field__label" htmlFor="enrollment-token">
+            Testigo de alta (solo la primera vez)
+          </label>
+          <input
+            id="enrollment-token"
+            className="input"
+            type="password"
+            value={token}
+            placeholder="Valor de NEXUS_HOST_ENROLLMENT_TOKEN"
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(event) => setToken(event.target.value)}
+          />
+          <span className="field__hint">
+            El servidor lo exige la primera vez que este PC se conecta, para que
+            nadie pueda registrar su identificador antes que el. No se guarda en
+            ningun sitio: se usa una vez y se descarta.
+          </span>
+        </div>
+
+        <div className="row" style={{ marginTop: "var(--space-4)" }}>
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!configured || checking}
+            onClick={() => onCheckSignaling(token)}
+          >
+            {checking ? "Comprobando..." : "Probar conexion"}
+          </button>
+        </div>
+
+        {probe && (
+          <div style={{ marginTop: "var(--space-4)" }} className="stack">
+            <Notice tone={probe.connected ? (probe.hasRelay ? "accent" : "warn") : "danger"}>
+              {probe.detail}
+            </Notice>
+            {probe.connected && (
+              <table className="table">
+                <tbody>
+                  <tr>
+                    <td style={{ color: "var(--text-secondary)", width: 280 }}>
+                      Servidores de red recibidos
+                    </td>
+                    <td className="mono">{probe.iceServers}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ color: "var(--text-secondary)" }}>
+                      Retransmision (TURN)
+                    </td>
+                    <td className="mono">{probe.hasRelay ? "si" : "no"}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ color: "var(--text-secondary)" }}>
+                      Alcanzable desde otra red
+                    </td>
+                    <td className="mono">
+                      {probe.supportsRemoteNetworks ? "si" : "no"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <Card title="Calidad de transmision" hint="Se aplicara cuando haya transmision de pantalla (etapa 5).">
         <Notice>
           Los perfiles de calidad (fluido, equilibrado, nitido y automatico) ya estan
           definidos y validados en el codigo compartido, con sus limites de

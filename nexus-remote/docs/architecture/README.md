@@ -17,3 +17,6 @@ de otra manera**, que es lo que se pierde con el tiempo.
 | [0006](ADR-0006-infraestructura-propia.md) | Infraestructura propia con Coturn | Aceptada |
 | [0007](ADR-0007-verificacion-multiplataforma.md) | Cómo se verifica código que no se puede ejecutar aquí | Aceptada |
 | [0008](ADR-0008-sin-datos-simulados.md) | Nada de datos simulados en la interfaz | Aceptada |
+| [0009](ADR-0009-atadura-de-sesion.md) | La sesión se ata a la huella DTLS del otro extremo | Aceptada |
+| [0010](ADR-0010-emparejamiento-por-red.md) | El servidor no retransmite códigos de emparejamiento | Aceptada |
+| [0011](ADR-0011-directorio-de-identidades.md) | El servidor conoce identidades, no permisos | Aceptada |

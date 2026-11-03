@@ -21,6 +21,7 @@ import {
   type PairingView,
   type PermissionEntry,
   type PermissionProfile,
+  type SignalingProbe,
   type SystemStatus,
 } from "./api";
 import { Shell, type NavEntry } from "./components/Shell";
@@ -99,6 +100,8 @@ export function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [probe, setProbe] = useState<SignalingProbe | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -288,7 +291,21 @@ export function App() {
           summary={data.summary}
           busy={busy}
           error={actionError}
+          probe={probe}
+          checking={checking}
           onSaveSignalingUrl={(url) => void run(() => api.setSignalingUrl(url))}
+          onCheckSignaling={(token) => {
+            setChecking(true);
+            setProbe(null);
+            setActionError(null);
+            void api
+              .checkSignaling(token.length > 0 ? token : undefined)
+              .then(setProbe)
+              .catch((error: unknown) => {
+                setActionError(toHostError(error).message);
+              })
+              .finally(() => setChecking(false));
+          }}
         />
       )}
     </Shell>

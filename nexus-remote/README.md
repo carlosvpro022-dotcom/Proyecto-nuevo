@@ -8,10 +8,10 @@ exclusivo a los dispositivos previamente autorizados.
 
 ## Estado real del proyecto
 
-**Etapa 1 terminada. Etapa 2 escrita y compilada, pendiente de probar en
+**Etapas 1 y 3 terminadas. Etapa 2 escrita y compilada, pendiente de probar en
 Windows.** Lo que sigue es exacto, y distingue tres cosas: lo que se ha
-ejecutado y probado, lo que está escrito y compila para Windows pero **nadie
-ha ejecutado allí**, y lo que todavía no existe.
+ejecutado y probado, lo que está escrito pero **nadie ha ejecutado en su
+entorno real**, y lo que todavía no existe.
 
 ### Funciona y está probado
 
@@ -24,16 +24,20 @@ ha ejecutado allí**, y lo que todavía no existe.
 | **Lista de autorizados** | SQLite con permisos por dispositivo, revocación, borrado e historial de sesiones. |
 | **Límite de intentos** | Bloqueo progresivo por dispositivo. Esperar a que expire no reinicia la escalada. |
 | **Restricción de acceso al disco** | Solo las carpetas declaradas. Rechaza recorrido de directorios, enlaces que escapan y nombres reservados de Windows. |
+| **Servidor de señalización** | `/v1/signaling` completo: autenticación Ed25519 del dispositivo, directorio de identidades con testigo de alta, límite de intentos por dispositivo y por origen, enrutado entre los dos extremos, registro de conexiones. |
+| **Conexión cifrada entre dispositivos** | WebRTC de verdad: ICE encuentra camino, DTLS cifra y los canales `control` e `input` transportan órdenes. Comprobado de extremo a extremo: un toque enviado por un par llega al otro y se aplica. |
+| **Autenticación mutua atada al canal** | Cada extremo firma las dos huellas DTLS de la sesión. Si el servidor sustituye una para interceptar, la sesión se aborta ([ADR-0009](docs/architecture/ADR-0009-atadura-de-sesion.md)). |
 | **Credenciales TURN temporales** | Derivación HMAC-SHA1 compatible con Coturn, verificada contra un vector de prueba público. |
-| **Servidor de señalización** | Arranca, valida su configuración, responde `/health` y `/v1/info`, y para de forma ordenada. |
-| **Panel del host** | Aplicación Tauri con 8 pantallas. Muestra datos reales del equipo. |
+| **Panel del host** | Aplicación Tauri con 8 pantallas. Muestra datos reales del equipo, y comprueba contra el servidor de verdad. |
 
-### Escrito y compila para Windows, pero sin ejecutar allí
+### Escrito, pero sin ejecutar en su entorno real
 
-Esto es la etapa 2. El compilador verificó tipos, nombres de API y firmas
-mediante compilación en cruce a `x86_64-pc-windows-gnu`, con clippy pedantic y
-los avisos como errores. **Nadie lo ha ejecutado en un PC con Windows**, así
-que el comportamiento está sin comprobar.
+Son dos cosas distintas, y conviene no confundirlas.
+
+**El motor de Windows (etapa 2).** El compilador verificó tipos, nombres de API
+y firmas mediante compilación en cruce a `x86_64-pc-windows-gnu`, con clippy
+pedantic y los avisos como errores. **Nadie lo ha ejecutado en un PC con
+Windows**, así que el comportamiento está sin comprobar.
 
 | Pieza | Cómo está implementada |
 | --- | --- |
@@ -46,21 +50,33 @@ están los errores difíciles: la tabla de teclas, la aritmética de coordenadas
 (verificada píxel a píxel sobre siete configuraciones de pantalla) y la
 conversión de los datos crudos del sistema.
 
+**La conexión entre redes distintas (etapa 3).** El código de red sí se ejecuta
+aquí, y la conexión WebRTC se establece de verdad. Pero en bucle local los dos
+extremos están en la misma máquina, ICE encuentra camino directo siempre y el
+relay TURN nunca se usa. Lo que falta por comprobar no es el código, es la
+**topología**: dos redes, dos NAT, un Coturn en marcha y un certificado válido.
+Hace falta desplegar el servidor.
+
 ### Todavía no existe
 
 | Pieza | Etapa | Qué falta |
 | --- | --- | --- |
-| Canal de señalización | 3 | El WebSocket `/v1/signaling`. La maquinaria de autenticación que necesita ya existe. |
-| Sesión WebRTC | 3 | Negociación ICE y canales de medios y datos. |
+| Emparejar desde fuera de la red local | 3 | El servidor lo rechaza a propósito: el código tiene unos 40 bits y viajaría en claro por él. Falta enviar un verificador Argon2id y confirmar la huella en el host ([ADR-0010](docs/architecture/ADR-0010-emparejamiento-por-red.md)). Mientras, se empareja en la red local. |
 | Cliente de iPhone y iPad | 4 | El proyecto entero. **Hace falta un Mac con Xcode.** |
+| Transmisión de la pantalla | 5 | La captura existe y la conexión existe; falta codificar los fotogramas y enviarlos por una pista de medios. |
 | Audio, archivos, portapapeles, administración | 5 | Las llamadas al sistema. Protocolo, permisos y contabilidad están listos. |
 | Cifrado de la clave del host con DPAPI | 6 | Hoy la clave privada está en un archivo sin cifrar. |
 
 El panel refleja esta misma distinción con tres estados —*Probado*, *Sin
-probar*, *Pendiente*—, y una prueba impide marcar como probado código de
-Windows que nadie ha ejecutado en Windows. Además del estado del proyecto, el
-panel comprueba **este equipo concreto**: intenta enumerar las pantallas y
-crear el inyector, y enseña lo que ocurrió.
+probar*, *Pendiente*—, y cuatro pruebas lo sostienen: impiden marcar como
+probado código de Windows que nadie ha ejecutado en Windows, declarar probada
+la conexión entre redes distintas sin haberla desplegado, anunciar como
+disponible algo que el servidor rechaza, y anunciar capacidades que el host no
+tiene implementadas.
+
+Además del estado del proyecto, el panel comprueba **este equipo concreto**:
+intenta enumerar las pantallas, crear el inyector y —si se le pide— conectarse
+de verdad al servidor configurado, y enseña lo que ocurrió.
 
 **No hay datos de ejemplo en ninguna parte**
 ([ADR-0008](docs/architecture/ADR-0008-sin-datos-simulados.md)).
@@ -68,24 +84,31 @@ crear el inyector, y enseña lo que ocurrió.
 ### Verificación
 
 ```
-475 pruebas automatizadas, todas en verde
-  · nexus-security        102    criptografía, emparejamiento, antirreenvío
-  · nexus-core             98    protocolo, permisos, estados
-  · nexus-windows-host     62    almacén, identidad, servicio del host, comandos
+673 pruebas automatizadas, todas en verde
+  · nexus-security        131    criptografía, emparejamiento, antirreenvío, atadura de sesión
+  · nexus-signaling       129    protocolo del canal, directorio de identidades, enrutado, registro
+  · nexus-core            108    protocolo, permisos, estados, limpieza de texto
+  · nexus-windows-host     84    almacén, identidad, sesión de control, comandos
   · nexus-input            44    tabla de teclas, coordenadas absolutas
+  · nexus-transport        44    códec, ICE, cliente, traducción de configuración
   · nexus-capture          41    fotogramas, ritmo, enumeración de monitores
   · nexus-file-transfer    37    restricción de acceso, transferencias
-  · nexus-transport        28    códec, ICE, enlace
-  · nexus-signaling        27    configuración, TURN, rutas
-  · integración            22    recorridos completos entre crates
+  · integración            34    recorridos completos, incluida una sesión real de extremo a extremo
   · nexus-audio            14    formato, volumen
 
 cargo fmt            sin diferencias
 clippy::pedantic     sin un solo aviso, con -D warnings, en Linux y en Windows
 panel                8 pantallas verificadas en Chromium con datos reales del backend
 cruce a Windows      clippy --target x86_64-pc-windows-gnu limpio en los 7 crates
-servidor             arranca, responde /health y /v1/info, y para con SIGTERM
+sesión completa      servidor real en un puerto local, ICE, DTLS, canal de datos y
+                     un evento de entrada que llega al final de la cadena
 ```
+
+La última línea es la prueba que sostiene la etapa 3. No hay dobles de prueba
+en ninguna capa: el servidor es el de verdad, montado con la misma función que
+usa el binario; las claves son Ed25519 reales; la conexión es WebRTC real; y el
+manejador que recibe la orden al final es el del producto, no una copia escrita
+para la prueba.
 
 ---
 
@@ -235,16 +258,36 @@ disponible. Lo que más probable es que necesite ajuste: la lectura de los
 fotogramas (paso de fila y formato) y la marca de tecla extendida en teclados
 no españoles.
 
-Después, **etapa 3 — Comunicación**: el WebSocket `/v1/signaling` y WebRTC.
+**Desplegar el servidor.** La etapa 3 está terminada y probada, pero contra
+sockets locales. Para cerrarla hace falta una máquina con IP pública y un
+dominio; la guía completa está en
+[docs/deployment/despliegue.md](docs/deployment/despliegue.md). Después, en el
+panel del host, *Configuración* → **Probar conexión**: esa comprobación se
+conecta de verdad y dice qué encontró, incluido si el relay TURN está sirviendo.
+
 Luego cliente Apple (4), funciones avanzadas (5) y producción (6). Ninguna
 avanza hasta que la anterior funcione.
+
+### Probar el canal de señalización sin servidor
+
+Las dos cosas se pueden ver funcionando aquí mismo, sin desplegar nada:
+
+```bash
+cd nexus-remote
+cargo test -p nexus-integration-tests --test senalizacion
+cargo test -p nexus-integration-tests --test sesion_extremo_a_extremo -- --nocapture
+```
+
+La segunda levanta un servidor de señalización real en un puerto libre, conecta
+dos dispositivos con claves Ed25519 propias, negocia WebRTC, verifica la atadura
+a las huellas DTLS y entrega un evento de entrada al manejador del host.
 
 ### Lo que hace falta y no se puede resolver desde aquí
 
 | Qué | Para qué | Cuándo |
 | --- | --- | --- |
 | Un PC con Windows 10 u 11 | Probar captura y control de entrada | Etapa 2 |
-| Un servidor con IP pública y un dominio | Señalización y TURN | Etapa 3 |
+| Un servidor con IP pública y un dominio | Comprobar la conexión entre redes distintas y el relay TURN | Etapa 3 |
 | Un Mac con Xcode | Compilar el cliente de iPhone y iPad | Etapa 4 |
 | Cuenta de desarrollador de Apple | Instalar en los dispositivos | Etapa 4 |
 

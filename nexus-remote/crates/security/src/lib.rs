@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod binding;
 pub mod challenge;
 pub mod error;
 pub mod identity;
@@ -16,7 +17,9 @@ pub mod pairing;
 pub mod ratelimit;
 pub mod registry;
 pub mod replay;
+pub mod tokens;
 
+pub use binding::{BindingProof, DtlsFingerprint, FingerprintAlgorithm, SessionBinding};
 pub use challenge::{AuthRole, AuthTranscript, Challenge, ChallengeStore, Nonce};
 pub use error::{SecurityError, SecurityResult};
 pub use identity::{
@@ -28,3 +31,4 @@ pub use registry::{
     AuthOutcome, AuthRequest, Authenticator, DeviceRecord, DeviceRegistry, InMemoryRegistry,
 };
 pub use replay::ReplayGuard;
+pub use tokens::secret_matches;

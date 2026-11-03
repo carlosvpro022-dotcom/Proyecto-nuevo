@@ -30,6 +30,8 @@ pub mod commands;
 pub mod error;
 pub mod host;
 pub mod identity;
+pub mod session;
+pub mod signaling;
 pub mod store;
 pub mod system;
 
@@ -85,6 +87,7 @@ pub fn run() {
             commands::set_signaling_url,
             commands::list_monitors,
             commands::engine_status,
+            commands::check_signaling,
             commands::feature_matrix,
             commands::permission_catalog,
         ])

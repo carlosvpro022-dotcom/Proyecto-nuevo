@@ -65,14 +65,38 @@ Un booleano «funciona / no funciona» no basta para describir esto, así que
 
 | Estado | Significa | Nivel |
 | --- | --- | --- |
-| `working` | Ejecutado y probado | 1 |
-| `unverified` | Escrito y compilado para Windows, **nunca ejecutado allí** | 2 |
+| `working` | Ejecutado y probado donde se escribe | 1 |
+| `unverified` | Escrito y compilado, **nunca ejecutado en su entorno real** | 2 |
 | `pending` | Todavía no implementado | — |
 
-El panel los muestra con colores distintos y el aviso correspondiente. Dos
-pruebas lo sostienen: una comprueba que el estado concuerda con la etapa, y
-otra, `nada_de_la_etapa_2_se_declara_probado`, impide marcar como probado
-código de Windows que nadie ha ejecutado en Windows.
+El panel los muestra con colores distintos y el aviso correspondiente. Cuatro
+pruebas lo sostienen:
+
+- `nada_de_la_etapa_2_se_declara_probado` impide marcar como probado código de
+  Windows que nadie ha ejecutado en Windows.
+- `lo_que_depende_de_un_despliegue_no_se_declara_probado` hace lo mismo con la
+  conexión entre redes distintas.
+- `lo_que_el_servidor_rechaza_figura_como_pendiente` evita anunciar como
+  disponible algo que el servidor rechaza a propósito.
+- `el_host_no_anuncia_capacidades_que_no_tiene` impide que el host anuncie audio
+  o archivos antes de implementarlos, porque el controlador los ofrecería en su
+  interfaz y luego no funcionarían.
+
+### Un matiz que apareció en la etapa 3
+
+El nivel 1 dice «ejecutado y probado», y el código de red **sí** se ejecuta
+aquí: el servidor de señalización arranca de verdad, el WebSocket es real y la
+conexión WebRTC se establece de verdad. Es tentador concluir que la conexión
+remota funciona.
+
+No es lo mismo. En bucle local ICE encuentra camino directo siempre, y nunca se
+usa el relay. Lo que está sin comprobar no es el código, es la **topología**:
+dos redes distintas, dos NAT, un Coturn en marcha y un certificado válido.
+
+De ahí que la etapa 3 tenga entradas separadas en la matriz: la señalización y
+la conexión cifrada como *Probado*, y la conexión entre redes distintas como
+*Sin probar*. El nivel de verificación lo marca el entorno en que algo se ha
+ejecutado, no la cantidad de código que se ha escrito.
 
 ## Consecuencias
 
@@ -86,3 +110,6 @@ código de Windows que nadie ha ejecutado en Windows.
 - **Antes de dar por buena la etapa 2 hace falta un PC con Windows real.** El
   compilado en cruce no sustituye a comprobar que los fotogramas llegan, que
   el cursor cae donde debe y que las combinaciones de teclas funcionan.
+- **Antes de dar por buena la conexión remota hace falta desplegar el
+  servidor.** Que funcione entre dos procesos de la misma máquina no dice nada
+  sobre si funcionará desde una red móvil.

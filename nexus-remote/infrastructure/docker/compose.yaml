@@ -55,6 +55,12 @@ services:
       NEXUS_TURN_URLS: ${NEXUS_TURN_URLS:?falta NEXUS_TURN_URLS}
       NEXUS_STUN_URLS: ${NEXUS_STUN_URLS:-}
       NEXUS_CREDENTIAL_TTL_SECS: ${NEXUS_CREDENTIAL_TTL_SECS:-43200}
+      NEXUS_HOST_ENROLLMENT_TOKEN: ${NEXUS_HOST_ENROLLMENT_TOKEN:?falta NEXUS_HOST_ENROLLMENT_TOKEN}
+      # Este servicio solo es alcanzable a traves de Caddy, que es quien pone la
+      # cabecera. Si algun dia se expusiera el puerto directamente, esto tendria
+      # que volver a false: creer la cabecera estando expuesto permitiria
+      # falsear la direccion de origen y burlar el limite de intentos.
+      NEXUS_TRUST_PROXY_HEADER: ${NEXUS_TRUST_PROXY_HEADER:-true}
       NEXUS_LOG: ${NEXUS_LOG:-info}
     security_opt:
       - no-new-privileges:true

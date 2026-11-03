@@ -26,17 +26,22 @@
 		-Server
 	}
 
-	# Canal de senalizacion. Caddy conserva la conexion WebSocket y le anade
-	# TLS, que es lo que el servidor de senalizacion no hace por si mismo.
-	handle /signaling* {
+	# Canal de senalizacion, sonda de salud e informacion del servicio. Caddy
+	# conserva la conexion WebSocket y le anade TLS, que es lo que el servidor
+	# de senalizacion no hace por si mismo. Tambien anade `X-Forwarded-For`,
+	# que es de donde el servidor saca la direccion de origen real.
+	handle /v1/* {
 		reverse_proxy signaling:8443
 	}
-
-	# Sonda de salud e informacion del servicio.
 	handle /health {
 		reverse_proxy signaling:8443
 	}
-	handle /v1/* {
+
+	# La ruta del canal es /v1/signaling. Se reescribe /signaling para que una
+	# direccion escrita a mano, o una invitacion de una version anterior, no
+	# acabe en un 404 que nadie sabria interpretar.
+	handle /signaling* {
+		rewrite * /v1/signaling
 		reverse_proxy signaling:8443
 	}
 

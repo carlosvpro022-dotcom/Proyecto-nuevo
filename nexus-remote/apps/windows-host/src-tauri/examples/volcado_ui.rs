@@ -25,7 +25,7 @@ use nexus_windows_host::commands::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Host efimero: base de datos en memoria, identidad recien generada.
     let mut host = HostService::open_ephemeral(DeviceIdentity::generate(DeviceId::new()))?;
-    host.set_signaling_url("wss://nexus.midominio.com/signaling")?;
+    host.set_signaling_url("wss://nexus.midominio.com/v1/signaling")?;
 
     let now = Timestamp::now();
 

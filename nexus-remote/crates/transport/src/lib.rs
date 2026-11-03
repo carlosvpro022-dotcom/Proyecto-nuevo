@@ -18,12 +18,20 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "peer")]
+pub mod client;
 pub mod codec;
 pub mod error;
 pub mod ice;
 pub mod link;
+#[cfg(feature = "peer")]
+pub mod peer;
 
+#[cfg(feature = "peer")]
+pub use client::{Accepted, ConnectRequest, SignalingClient};
 pub use codec::{MAX_MESSAGE_BYTES, decode_server_message, encode_client_message};
 pub use error::{TransportError, TransportResult};
 pub use ice::{IceConfiguration, TransportPolicy};
 pub use link::{LinkEvent, LinkState, SignalingLink};
+#[cfg(feature = "peer")]
+pub use peer::{LinkPhase, PeerEvent, PeerRole, PeerSession};

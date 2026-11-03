@@ -22,7 +22,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use nexus_core::{DeviceId, DeviceInfo, DevicePlatform, DeviceRole, PermissionSet, Timestamp};
+use nexus_core::{
+    Capability, CapabilitySet, DeviceId, DeviceInfo, DevicePlatform, DeviceRole, PermissionSet,
+    Timestamp,
+};
 use nexus_security::identity::DevicePublicKey;
 use nexus_security::pairing::{DEFAULT_PAIRING_TTL, PairingInvite};
 use nexus_security::registry::DeviceRecord;
@@ -384,6 +387,37 @@ impl HostService {
     /// [`HostError::Database`] si la lectura falla.
     pub fn signaling_url(&self) -> HostResult<Option<String>> {
         self.store.get_setting(SETTING_SIGNALING_URL)
+    }
+
+    /// Capacidades que este host puede ofrecer de verdad hoy.
+    ///
+    /// No se anuncia lo que no esta implementado: si el host dijese que sabe
+    /// transmitir audio, el controlador lo ofreceria en su interfaz y luego no
+    /// funcionaria. Se van anadiendo a medida que se implementan.
+    #[must_use]
+    pub fn capabilities(&self) -> CapabilitySet {
+        let mut set = CapabilitySet::empty();
+        set.insert(Capability::ScreenStream);
+        set.insert(Capability::MultiMonitor);
+        set.insert(Capability::RemoteInput);
+        set.insert(Capability::TouchGestures);
+        set
+    }
+
+    /// Copia de la identidad criptografica del host.
+    ///
+    /// Existe porque una tarea de red no puede retener el cerrojo del servicio
+    /// mientras espera: el panel se quedaria bloqueado. La clave privada no
+    /// sale del proceso; es la misma que ya estaba en memoria.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Security`] si la clave guardada no se puede reconstruir.
+    pub fn duplicate_identity(&self) -> HostResult<DeviceIdentity> {
+        Ok(DeviceIdentity::from_secret_bytes(
+            self.identity.device_id(),
+            self.identity.export_secret().as_slice(),
+        )?)
     }
 
     /// Enumera los monitores del host.

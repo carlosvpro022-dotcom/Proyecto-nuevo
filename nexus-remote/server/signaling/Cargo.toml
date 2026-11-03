@@ -9,16 +9,18 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
 hmac = "0.13.0"
 nexus-core = { version = "0.1.0", path = "../../crates/core" }
 nexus-security = { version = "0.1.0", path = "../../crates/security" }
+nexus-transport = { version = "0.1.0", path = "../../crates/transport", default-features = false }
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["trace", "limit"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }

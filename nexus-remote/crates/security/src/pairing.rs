@@ -285,7 +285,15 @@ pub struct PairingInvite {
     pub pairing_id: PairingId,
     /// Codigo en claro.
     pub code: String,
-    /// Huella corta de la clave publica del host, para comparar a ojo.
+    /// Clave publica Ed25519 del host, en hexadecimal.
+    ///
+    /// Viaja en la invitacion, que llega al dispositivo fuera de banda (un QR
+    /// en la pantalla del host). Es la unica forma de que el controlador
+    /// obtenga la clave del host **sin preguntarsela al servidor**: si la
+    /// pidiese al servidor, un servidor comprometido podria darle la suya y la
+    /// autenticacion mutua posterior no demostraria nada.
+    pub host_public_key_hex: String,
+    /// Huella corta de la misma clave, para comparar a ojo.
     pub host_fingerprint: String,
     /// Caducidad.
     pub expires_at: Timestamp,
@@ -305,6 +313,7 @@ impl PairingInvite {
             host_id: session.host_id,
             pairing_id: session.id,
             code: code.as_str().to_owned(),
+            host_public_key_hex: host_key.to_hex(),
             host_fingerprint: host_key.short_fingerprint(),
             expires_at: session.expires_at,
         }
@@ -596,6 +605,21 @@ mod tests {
             .redeem(&back.parsed_code().expect("codigo valido"), NOW)
             .expect("canjea");
         assert_eq!(session.state, PairingState::Completed);
+    }
+
+    #[test]
+    fn invite_carries_the_full_host_key_not_just_its_fingerprint() {
+        // La huella corta sirve para que una persona compare a ojo. Para que el
+        // controlador pueda autenticar al host de verdad necesita la clave
+        // completa, y tiene que llegarle fuera de banda: en la invitacion.
+        let (session, code) = open();
+        let host_key = DeviceIdentity::generate(session.host_id).public_key();
+        let invite = PairingInvite::new("wss://x", &session, &code, &host_key);
+
+        assert_eq!(invite.host_public_key_hex, host_key.to_hex());
+        let recovered =
+            DevicePublicKey::from_hex(&invite.host_public_key_hex).expect("clave utilizable");
+        assert_eq!(recovered, host_key);
     }
 
     #[test]

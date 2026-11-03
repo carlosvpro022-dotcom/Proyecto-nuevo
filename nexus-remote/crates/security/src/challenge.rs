@@ -135,7 +135,7 @@ pub enum AuthRole {
 
 impl AuthRole {
     /// Byte que representa el papel dentro de la transcripcion.
-    const fn tag(self) -> u8 {
+    pub(crate) const fn tag(self) -> u8 {
         match self {
             Self::Host => 0x01,
             Self::Controller => 0x02,

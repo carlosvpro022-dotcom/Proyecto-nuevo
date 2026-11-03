@@ -6,13 +6,31 @@
 //!
 //! Secuencia normal de un controlador:
 //!
-//! 1. `Hello` -> el servidor responde `Challenge` con un nonce aleatorio.
-//! 2. `AuthProof` con la firma Ed25519 del nonce -> `AuthAccepted` o `AuthRejected`.
-//! 3. `RequestSession` contra el identificador del host.
+//! 1. `Hello` con su clave publica -> el servidor responde `Challenge` con un
+//!    nonce aleatorio.
+//! 2. `AuthProof` con su propio nonce y la firma Ed25519 de la transcripcion ->
+//!    `AuthAccepted` (con los servidores ICE) o `AuthRejected`.
+//! 3. `RequestSession` contra el identificador del host. El host recibe
+//!    `SessionRequested` y contesta `AcceptSession` o `RejectSession`.
 //! 4. Intercambio de `Offer`, `Answer` y `IceCandidate` con el host.
+//! 5. `PeerAuth` en ambas direcciones, cuando cada extremo ya conoce las dos
+//!    huellas DTLS.
 //!
 //! El host sigue el mismo arranque y luego envia `RegisterHost` para quedar
-//! localizable.
+//! localizable, que el servidor confirma con `HostRegistered`.
+//!
+//! # Por que hace falta el paso 5
+//!
+//! Los pasos 1 y 2 autentican el dispositivo **ante el servidor**. Eso no basta:
+//! el servidor reenvia el SDP, y el SDP lleva la huella del certificado DTLS.
+//! Un servidor comprometido podria sustituirla y leer la sesion completa sin que
+//! ninguno de los dos extremos lo notase.
+//!
+//! El paso 5 lo cierra: cada extremo firma las dos huellas DTLS de la sesion y
+//! comprueba la firma del otro contra la huella que negocio de verdad. La
+//! transcripcion y su verificacion estan en
+//! `nexus_security::binding::SessionBinding`. Si el servidor sustituye una
+//! huella, la sesion se aborta.
 
 use serde::{Deserialize, Serialize};
 
@@ -80,18 +98,36 @@ pub enum AuthRejection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ClientToServer {
-    /// Primer mensaje: anuncia quien dice ser.
+    /// Primer mensaje: anuncia quien dice ser y con que clave.
     Hello {
-        /// Datos declarados del dispositivo.
+        /// Datos declarados del dispositivo. Informativos: no son de confianza.
         device: DeviceInfo,
         /// Capacidades que soporta.
         capabilities: CapabilitySet,
+        /// Clave publica Ed25519 del dispositivo, en hexadecimal.
+        ///
+        /// El servidor la compara con la que tenga registrada para ese
+        /// identificador. Si no coincide, rechaza la conexion: eso impide que
+        /// otro dispositivo se apropie de un identificador ya conocido.
+        public_key_hex: String,
+        /// Testigo de alta, solo en la primera conexion de un host.
+        ///
+        /// Sirve para que nadie pueda registrar el identificador de un host
+        /// antes que el propio host. No se guarda en ningun sitio: se usa una
+        /// vez y se descarta.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enrollment_token: Option<String>,
     },
-    /// Firma Ed25519 del reto recibido, en hexadecimal.
+    /// Respuesta al reto del servidor.
     AuthProof {
         /// Identificador del dispositivo.
         device_id: DeviceId,
-        /// Firma de `nonce || server_time` en hexadecimal.
+        /// Nonce que aporta el dispositivo, en hexadecimal.
+        ///
+        /// Que ambos extremos aporten nonce es lo que impide que el servidor
+        /// fije por completo lo que el dispositivo firma.
+        client_nonce_hex: String,
+        /// Firma Ed25519 sobre la transcripcion de autenticacion, en hexadecimal.
         signature_hex: String,
     },
     /// El host se declara disponible para recibir sesiones.
@@ -105,6 +141,38 @@ pub enum ClientToServer {
         host_id: DeviceId,
         /// Permisos que el controlador pretende ejercer.
         requested_permissions: PermissionSet,
+    },
+    /// El host acepta la sesion propuesta (mensaje del host al servidor).
+    AcceptSession {
+        /// Sesion que se acepta.
+        session_id: SessionId,
+        /// Capacidades que quedan tras negociar con el controlador.
+        negotiated_capabilities: CapabilitySet,
+        /// Permisos que el host concede de verdad a esta sesion.
+        ///
+        /// Los decide el host a partir de su registro de dispositivos, no el
+        /// servidor y no lo que pidiera el controlador.
+        effective_permissions: PermissionSet,
+    },
+    /// El host rechaza la sesion propuesta.
+    RejectSession {
+        /// Sesion que se rechaza.
+        session_id: SessionId,
+        /// Texto informativo para el controlador.
+        reason: String,
+    },
+    /// Prueba de atadura de la sesion al canal cifrado.
+    ///
+    /// Se envia despues de intercambiar oferta y respuesta, cuando cada extremo
+    /// ya conoce las dos huellas DTLS. El servidor solo la reenvia: no puede
+    /// forjarla ni alterarla sin que el otro extremo lo detecte.
+    PeerAuth {
+        /// Sesion a la que pertenece.
+        session_id: SessionId,
+        /// Huella DTLS propia, en formato canonico de RFC 4572.
+        fingerprint: String,
+        /// Firma Ed25519 sobre la transcripcion de atadura, en hexadecimal.
+        signature_hex: String,
     },
     /// Descripcion SDP de oferta.
     Offer {
@@ -131,7 +199,16 @@ pub enum ClientToServer {
         sdp_mid: Option<String>,
     },
     /// Canje de un codigo de emparejamiento temporal.
+    ///
+    /// **El servidor rechaza este mensaje a dia de hoy.** Ver
+    /// `docs/architecture/ADR-0010-emparejamiento-por-red.md`: el codigo tiene
+    /// unos 40 bits de entropia y, tal como esta definido este mensaje,
+    /// viajaria en claro por el servidor, que es justo a quien el diseno no
+    /// concede confianza. El mensaje se conserva porque el canje si ocurre en
+    /// la red local, y para no cambiar el protocolo cuando se implemente.
     RedeemPairingCode {
+        /// Host contra el que se canjea, tomado de la invitacion.
+        host_id: DeviceId,
         /// Intento de emparejamiento al que corresponde.
         pairing_id: PairingId,
         /// Codigo mostrado por el host.
@@ -160,13 +237,20 @@ pub enum ServerToClient {
         server_time: Timestamp,
     },
     /// Autenticacion correcta.
+    ///
+    /// Deliberadamente no lleva permisos: el servidor de senalizacion no
+    /// concede ninguno. Los permisos de una sesion los decide el host y llegan
+    /// en [`ServerToClient::SessionAccepted`].
     AuthAccepted {
         /// Sesion de senalizacion asignada.
         session_id: SessionId,
         /// Servidores ICE a usar.
         ice_servers: Vec<IceServer>,
-        /// Permisos efectivos concedidos por el host a este dispositivo.
-        effective_permissions: PermissionSet,
+    },
+    /// El host quedo registrado y localizable.
+    HostRegistered {
+        /// Identificador con el que quedo registrado.
+        host_id: DeviceId,
     },
     /// Autenticacion rechazada.
     AuthRejected {
@@ -182,6 +266,12 @@ pub enum ServerToClient {
         session_id: SessionId,
         /// Controlador que la pide.
         controller: DeviceInfo,
+        /// Capacidades que anuncio el controlador al conectarse.
+        ///
+        /// El host las necesita para calcular la interseccion con las suyas y
+        /// devolverla en [`ServerToClient::SessionAccepted`]. Sin ellas no
+        /// podria negociar nada.
+        controller_capabilities: CapabilitySet,
         /// Permisos que pretende ejercer.
         requested_permissions: PermissionSet,
     },
@@ -224,6 +314,21 @@ pub enum ServerToClient {
         /// Identificador del medio.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sdp_mid: Option<String>,
+    },
+    /// Reenvio de la prueba de atadura del otro extremo.
+    PeerAuth {
+        /// Sesion a la que pertenece.
+        session_id: SessionId,
+        /// Dispositivo que firmo, segun el servidor.
+        ///
+        /// Es un dato del servidor, no una afirmacion verificada: lo que vale
+        /// es la firma, que cubre los dos identificadores. Si el servidor
+        /// mintiese aqui, la verificacion fallaria.
+        device_id: DeviceId,
+        /// Huella DTLS que declara el otro extremo.
+        fingerprint: String,
+        /// Firma Ed25519 sobre la transcripcion de atadura.
+        signature_hex: String,
     },
     /// El otro extremo desaparecio.
     PeerGone {
@@ -285,10 +390,33 @@ mod tests {
             ClientToServer::Hello {
                 device: device(),
                 capabilities: CapabilitySet::empty(),
+                public_key_hex: "ab".repeat(32),
+                enrollment_token: None,
+            },
+            ClientToServer::Hello {
+                device: device(),
+                capabilities: CapabilitySet::empty(),
+                public_key_hex: "ab".repeat(32),
+                enrollment_token: Some("testigo-de-alta".to_owned()),
             },
             ClientToServer::AuthProof {
                 device_id: DeviceId::new(),
+                client_nonce_hex: "cd".repeat(32),
                 signature_hex: "ab".repeat(64),
+            },
+            ClientToServer::AcceptSession {
+                session_id,
+                negotiated_capabilities: CapabilitySet::empty(),
+                effective_permissions: PermissionSet::standard(),
+            },
+            ClientToServer::RejectSession {
+                session_id,
+                reason: "dispositivo no autorizado".to_owned(),
+            },
+            ClientToServer::PeerAuth {
+                session_id,
+                fingerprint: "sha-256 AA:BB".to_owned(),
+                signature_hex: "ef".repeat(64),
             },
             ClientToServer::RegisterHost { monitor_count: 2 },
             ClientToServer::RequestSession {
@@ -309,6 +437,7 @@ mod tests {
                 sdp_mid: Some("0".to_owned()),
             },
             ClientToServer::RedeemPairingCode {
+                host_id: DeviceId::new(),
                 pairing_id: PairingId::new(),
                 code: "483921".to_owned(),
                 public_key_hex: "cd".repeat(32),
@@ -336,7 +465,15 @@ mod tests {
                     credential: None,
                     expires_at: None,
                 }],
-                effective_permissions: PermissionSet::standard(),
+            },
+            ServerToClient::HostRegistered {
+                host_id: DeviceId::new(),
+            },
+            ServerToClient::PeerAuth {
+                session_id,
+                device_id: DeviceId::new(),
+                fingerprint: "sha-256 AA:BB".to_owned(),
+                signature_hex: "ef".repeat(64),
             },
             ServerToClient::AuthRejected {
                 reason: AuthRejection::RateLimited,
@@ -345,6 +482,7 @@ mod tests {
             ServerToClient::SessionRequested {
                 session_id,
                 controller: device(),
+                controller_capabilities: CapabilitySet::empty(),
                 requested_permissions: PermissionSet::view_only(),
             },
             ServerToClient::SessionAccepted {
@@ -380,6 +518,54 @@ mod tests {
         let raw =
             serde_json::to_string(&ClientToServer::RegisterHost { monitor_count: 1 }).expect("ok");
         assert!(raw.contains(r#""type":"register_host""#), "{raw}");
+    }
+
+    #[test]
+    fn the_enrollment_token_is_omitted_when_absent() {
+        let raw = serde_json::to_string(&ClientToServer::Hello {
+            device: device(),
+            capabilities: CapabilitySet::empty(),
+            public_key_hex: "ab".repeat(32),
+            enrollment_token: None,
+        })
+        .expect("serializa");
+        assert!(
+            !raw.contains("enrollment_token"),
+            "no debe viajar un campo vacio: {raw}"
+        );
+    }
+
+    #[test]
+    fn pairing_completion_does_not_carry_a_server_supplied_host_key() {
+        // La clave publica del host llega al controlador en la invitacion, que
+        // viaja fuera de banda. Si llegase en este mensaje, el controlador
+        // estaria confiando en el servidor para saber con quien habla, y la
+        // autenticacion mutua posterior no demostraria nada.
+        let raw = serde_json::to_string(&ServerToClient::PairingCompleted {
+            pairing_id: PairingId::new(),
+            host_id: DeviceId::new(),
+            permissions: PermissionSet::standard(),
+        })
+        .expect("serializa");
+        assert!(
+            !raw.contains("public_key"),
+            "el servidor no debe decirle al controlador cual es la clave del host: {raw}"
+        );
+    }
+
+    #[test]
+    fn authentication_acceptance_grants_no_permissions() {
+        // El servidor de senalizacion no concede permisos. Si este mensaje
+        // volviese a llevarlos, habria dos fuentes de verdad.
+        let raw = serde_json::to_string(&ServerToClient::AuthAccepted {
+            session_id: SessionId::new(),
+            ice_servers: vec![],
+        })
+        .expect("serializa");
+        assert!(
+            !raw.contains("permission"),
+            "el servidor no debe hablar de permisos: {raw}"
+        );
     }
 
     #[test]

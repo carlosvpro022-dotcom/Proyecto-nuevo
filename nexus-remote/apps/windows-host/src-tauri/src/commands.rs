@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{HostError, UiError};
 use crate::host::{EngineStatus, HostService, pairing_ttl};
+use crate::signaling::SignalingProbe;
 
 /// Estado compartido de la aplicacion Tauri.
 pub struct AppState {
@@ -306,11 +307,25 @@ pub fn list_monitors(state: tauri::State<'_, AppState>) -> CmdResult<MonitorLayo
 
 /// Devuelve que funciones estan listas y que falta para las demas.
 ///
-/// El panel lo usa para no mostrar botones que no hacen nada: cada pantalla
-/// pendiente dice en que etapa llega y que le falta.
+/// Esta en el codigo y no en la documentacion a proposito: el panel la usa para
+/// no mostrar como terminado lo que no lo esta, y asi no puede quedarse
+/// desfasada sin que se note. Cada entrada pendiente dice en que etapa llega y
+/// que le falta.
+///
+/// Esta partida por etapas porque es como se lee y como se revisa.
 #[tauri::command]
 pub fn feature_matrix() -> Vec<FeatureStatus> {
-    use FeatureState::{Pending, Unverified, Working};
+    let mut todas = Vec::new();
+    todas.extend(fundacion());
+    todas.extend(motor_de_windows());
+    todas.extend(comunicacion());
+    todas.extend(funciones_avanzadas());
+    todas
+}
+
+/// Etapa 1: fundacion, identidad y emparejamiento.
+fn fundacion() -> Vec<FeatureStatus> {
+    use FeatureState::Working;
 
     vec![
         FeatureStatus {
@@ -341,6 +356,14 @@ pub fn feature_matrix() -> Vec<FeatureStatus> {
             stage: 1,
             detail: "Datos reales del sistema. Falta detectar si la sesion esta bloqueada.",
         },
+    ]
+}
+
+/// Etapa 2: el motor de captura y control de Windows.
+fn motor_de_windows() -> Vec<FeatureStatus> {
+    use FeatureState::Unverified;
+
+    vec![
         FeatureStatus {
             key: "monitors",
             label: "Deteccion de monitores",
@@ -362,19 +385,72 @@ pub fn feature_matrix() -> Vec<FeatureStatus> {
             stage: 2,
             detail: "Implementada con SendInput, con tabla de teclas y coordenadas absolutas                      probadas aparte. Compila para Windows; falta comprobarla en un PC real.",
         },
+    ]
+}
+
+/// Etapa 3: senalizacion y conexion entre dispositivos.
+fn comunicacion() -> Vec<FeatureStatus> {
+    use FeatureState::{Pending, Unverified, Working};
+
+    vec![
         FeatureStatus {
             key: "signaling",
-            label: "Conexion con el servidor propio",
-            state: Pending,
+            label: "Canal de senalizacion propio",
+            state: Working,
             stage: 3,
-            detail: "Falta el WebSocket /v1/signaling en el servidor y el cliente en el host.",
+            detail: "Servidor y cliente probados contra sockets reales: autenticacion Ed25519,                      limite de intentos, enrutado entre los dos extremos y credenciales TURN                      temporales.",
         },
         FeatureStatus {
             key: "webrtc",
-            label: "Sesion remota por WebRTC",
+            label: "Conexion cifrada entre dispositivos",
+            state: Working,
+            stage: 3,
+            detail: "ICE, DTLS y canal de datos comprobados de extremo a extremo: una orden                      enviada por un par llega cifrada al otro y se aplica.",
+        },
+        FeatureStatus {
+            key: "session_binding",
+            label: "Autenticacion mutua atada al canal cifrado",
+            state: Working,
+            stage: 3,
+            detail: "Cada extremo firma las dos huellas DTLS de la sesion. Si el servidor                      sustituye una para interceptar, la sesion se aborta.",
+        },
+        FeatureStatus {
+            key: "internet",
+            label: "Conexion entre redes distintas con relay",
+            state: Unverified,
+            stage: 3,
+            detail: "El codigo esta escrito y probado en bucle local, donde ICE encuentra camino                      directo. Falta desplegar el servidor con dominio y certificado, y un Coturn                      en marcha, para comprobarlo entre dos redes de verdad.",
+        },
+        FeatureStatus {
+            key: "pairing_relay",
+            label: "Emparejar un dispositivo desde fuera de casa",
             state: Pending,
             stage: 3,
-            detail: "Falta la negociacion ICE y los canales de medios y datos.",
+            detail: "El servidor lo rechaza a proposito: el codigo tiene unos 40 bits y viajaria                      en claro por el servidor. Falta enviar un verificador Argon2id y confirmar                      la huella en el host. Mientras, se empareja en la red local.",
+        },
+    ]
+}
+
+/// Etapa 5: funciones que faltan por implementar.
+fn funciones_avanzadas() -> Vec<FeatureStatus> {
+    use FeatureState::Pending;
+
+    vec![
+        FeatureStatus {
+            key: "reconnect",
+            label: "Reconexion automatica tras un corte",
+            state: Pending,
+            stage: 5,
+            detail: "La politica de reintentos con espera creciente esta escrita y probada \
+                     (nexus-transport::link), pero nada la pone en marcha todavia: falta el \
+                     bucle que mantiene la sesion viva, que llega con la transmision.",
+        },
+        FeatureStatus {
+            key: "video",
+            label: "Transmision de la pantalla al dispositivo",
+            state: Pending,
+            stage: 5,
+            detail: "La captura existe y la conexion existe; falta codificar los fotogramas y                      enviarlos por una pista de medios.",
         },
         FeatureStatus {
             key: "audio",
@@ -415,6 +491,58 @@ pub fn feature_matrix() -> Vec<FeatureStatus> {
 #[tauri::command]
 pub fn engine_status(state: tauri::State<'_, AppState>) -> CmdResult<EngineStatus> {
     with_host(&state, |host| Ok(host.engine_status()))
+}
+
+/// Intenta conectarse al servidor de senalizacion configurado.
+///
+/// A diferencia de [`feature_matrix`], esto **no describe el proyecto**: se
+/// conecta de verdad, se autentica y se declara disponible, y devuelve lo que
+/// ocurrio. Es la forma de comprobar un despliegue sin tener todavia un iPad al
+/// otro lado.
+///
+/// El testigo de alta se pasa desde la interfaz y no se guarda en ningun sitio:
+/// hace falta una sola vez, en la primera conexion de este host.
+///
+/// # Errors
+///
+/// [`HostError::InvalidInput`] si no hay direccion configurada. Un fallo de red
+/// o un rechazo del servidor **no** son errores: vienen dentro del resultado
+/// con su explicacion, que es justamente lo que se quiere ver.
+#[tauri::command]
+pub async fn check_signaling(
+    state: tauri::State<'_, AppState>,
+    enrollment_token: Option<String>,
+) -> CmdResult<SignalingProbe> {
+    // Todo lo que hace falta se saca con el cerrojo tomado y se suelta antes de
+    // tocar la red: retenerlo durante una espera dejaria el panel bloqueado.
+    let prepared = with_host(&state, |host| {
+        let url = host.signaling_url()?.ok_or_else(|| {
+            HostError::InvalidInput(
+                "falta configurar la direccion del servidor de senalizacion".to_owned(),
+            )
+        })?;
+        let monitors = host.list_monitors().map_or(1, |layout| {
+            u8::try_from(layout.0.len()).unwrap_or(u8::MAX).max(1)
+        });
+        Ok((
+            url,
+            host.describe_self(),
+            host.capabilities(),
+            host.duplicate_identity()?,
+            monitors,
+        ))
+    })?;
+
+    let (url, device, capabilities, identity, monitors) = prepared;
+    Ok(crate::signaling::probe(
+        &url,
+        &device,
+        &capabilities,
+        &identity,
+        enrollment_token.as_deref(),
+        monitors,
+    )
+    .await)
 }
 
 /// Devuelve el catalogo de permisos para la pantalla de seguridad.
@@ -530,23 +658,22 @@ mod tests {
             );
 
             match feature.state {
-                // Solo lo de la etapa 1 se ha podido ejecutar y probar aqui.
-                FeatureState::Working => assert_eq!(
-                    feature.stage, 1,
-                    "{} dice estar probado y es de la etapa {}",
-                    feature.key, feature.stage
-                ),
-                // "Sin verificar" significa escrito para Windows: etapa 2.
-                FeatureState::Unverified => assert_eq!(
-                    feature.stage, 2,
-                    "{} dice estar escrito sin probar y es de la etapa {}",
-                    feature.key, feature.stage
-                ),
-                FeatureState::Pending => assert!(
-                    feature.stage >= 3,
-                    "{} dice estar pendiente y es de la etapa {}",
+                // "Probado" solo vale para lo que se puede ejecutar y comprobar
+                // donde se escribe. El codigo de Windows (etapa 2) y el de
+                // Apple (etapa 4) necesitan hardware que no esta aqui, de modo
+                // que nunca pueden declararse probados por esta via.
+                FeatureState::Working => assert!(
+                    feature.stage != 2 && feature.stage != 4,
+                    "{} dice estar probado, pero la etapa {} necesita hardware                      que no esta en el entorno de desarrollo",
                     feature.key,
                     feature.stage
+                ),
+                // "Sin verificar" y "pendiente" tienen que decir que falta.
+                FeatureState::Unverified | FeatureState::Pending => assert!(
+                    feature.detail.contains("falta") || feature.detail.contains("Falta"),
+                    "{} no esta terminado y debe decir que falta: {}",
+                    feature.key,
+                    feature.detail
                 ),
             }
         }
@@ -568,6 +695,65 @@ mod tests {
                 "{} deberia decir que falta comprobarlo: {}",
                 feature.key,
                 feature.detail
+            );
+        }
+    }
+
+    #[test]
+    fn lo_que_depende_de_un_despliegue_no_se_declara_probado() {
+        // La trampa de esta etapa: todo funciona en bucle local y es tentador
+        // declarar que funciona desde Internet. No es lo mismo, y la diferencia
+        // la nota el usuario cuando lo intenta desde fuera de casa.
+        let internet = feature_matrix()
+            .into_iter()
+            .find(|f| f.key == "internet")
+            .expect("debe figurar la conexion entre redes distintas");
+        assert_eq!(internet.state, FeatureState::Unverified);
+        assert!(
+            internet.detail.contains("Falta") || internet.detail.contains("falta"),
+            "debe decir que falta: {}",
+            internet.detail
+        );
+    }
+
+    #[test]
+    fn lo_que_el_servidor_rechaza_figura_como_pendiente() {
+        // Si el relevo de emparejamiento apareciese como terminado, alguien
+        // intentaria emparejar desde fuera y no entenderia el rechazo.
+        let pairing = feature_matrix()
+            .into_iter()
+            .find(|f| f.key == "pairing_relay")
+            .expect("debe figurar el emparejamiento por red");
+        assert_eq!(pairing.state, FeatureState::Pending);
+        assert!(
+            pairing.detail.contains("red local"),
+            "debe decir que alternativa hay: {}",
+            pairing.detail
+        );
+    }
+
+    #[test]
+    fn el_host_no_anuncia_capacidades_que_no_tiene() {
+        // Anunciar audio o archivos haria que el controlador los ofreciese en
+        // su interfaz para despues no funcionar.
+        use nexus_core::Capability;
+        let host = HostService::open_ephemeral(nexus_security::DeviceIdentity::generate(
+            nexus_core::DeviceId::new(),
+        ))
+        .expect("host en memoria");
+        let capabilities = host.capabilities();
+
+        assert!(capabilities.has(Capability::ScreenStream));
+        assert!(capabilities.has(Capability::RemoteInput));
+        for todavia_no in [
+            Capability::AudioStream,
+            Capability::FileTransfer,
+            Capability::ClipboardText,
+            Capability::PowerControl,
+        ] {
+            assert!(
+                !capabilities.has(todavia_no),
+                "{todavia_no:?} no esta implementada y no debe anunciarse"
             );
         }
     }

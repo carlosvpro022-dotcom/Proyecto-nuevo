@@ -47,3 +47,24 @@ El servidor de señalización solo coordina el encuentro. No ve el contenido.
 - La señalización necesita TLS por su cuenta: WebRTC cifra los medios, no el
   canal donde se negocian. De ahí que el host rechace cualquier URL que no
   empiece por `wss://`.
+
+## Estado (etapa 3)
+
+Implementado y comprobado de extremo a extremo con sockets reales: ICE
+encuentra camino, DTLS cifra, y una orden enviada por un extremo llega al otro
+y se aplica, pasando por la comprobación de permisos del host.
+
+Dos matices que importan y que esta decisión no anticipaba:
+
+- **Lo comprobado es el bucle local**, donde los dos extremos están en la misma
+  máquina y hay camino directo. El relay TURN y el atravesamiento de NAT entre
+  dos redes distintas están escritos pero sin ejecutar contra un despliegue
+  real. En el panel figuran como *Sin probar*, no como terminados.
+- **Que el TURN no pueda descifrar no basta**, porque el servidor de
+  señalización reenvía la huella DTLS y podría sustituirla. Eso lo cierra
+  [ADR-0009](ADR-0009-atadura-de-sesion.md), que es consecuencia directa de
+  haber implementado esta decisión y mirarla de cerca.
+
+Los canales de datos son `control` e `input`, los dos ordenados y fiables. El
+razonamiento está en `crates/transport/src/peer.rs`. La pista de medios para la
+pantalla llega en la etapa 5.

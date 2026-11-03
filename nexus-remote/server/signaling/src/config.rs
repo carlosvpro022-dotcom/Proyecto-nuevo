@@ -63,6 +63,19 @@ pub struct Config {
     pub stun_urls: Vec<String>,
     /// Validez de las credenciales TURN que se emiten.
     pub credential_ttl: Duration,
+    /// Testigo que debe presentar un host la primera vez que se conecta.
+    ///
+    /// Sin el, cualquiera podria registrar el identificador de un host antes
+    /// que el propio host. Se compara en tiempo constante y no se escribe en
+    /// ningun registro.
+    pub host_enrollment_token: String,
+    /// Si se puede confiar en la cabecera `X-Forwarded-For`.
+    ///
+    /// Solo debe activarse cuando el proceso esta detras de un proxy inverso
+    /// propio **y no es alcanzable directamente**. Si se activa estando
+    /// expuesto, cualquiera podria falsear su direccion y burlar el limite de
+    /// intentos.
+    pub trust_proxy_header: bool,
 }
 
 impl Config {
@@ -116,6 +129,34 @@ impl Config {
             .map(|raw| split_urls(&raw))
             .unwrap_or_default();
 
+        let host_enrollment_token = required(&lookup, "NEXUS_HOST_ENROLLMENT_TOKEN")?;
+        if host_enrollment_token.len() < MIN_SECRET_LEN {
+            return Err(ConfigError::SecretTooShort {
+                name: "NEXUS_HOST_ENROLLMENT_TOKEN",
+                min_len: MIN_SECRET_LEN,
+            });
+        }
+        if host_enrollment_token == turn_shared_secret {
+            return Err(ConfigError::Invalid {
+                name: "NEXUS_HOST_ENROLLMENT_TOKEN",
+                value: "no puede ser igual al secreto de TURN".to_owned(),
+            });
+        }
+
+        let trust_proxy_header = match lookup("NEXUS_TRUST_PROXY_HEADER") {
+            None => false,
+            Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "si" => true,
+                "false" | "0" | "no" => false,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        name: "NEXUS_TRUST_PROXY_HEADER",
+                        value: raw,
+                    });
+                }
+            },
+        };
+
         let ttl_secs = match lookup("NEXUS_CREDENTIAL_TTL_SECS") {
             Some(raw) => raw.parse::<u64>().map_err(|_| ConfigError::Invalid {
                 name: "NEXUS_CREDENTIAL_TTL_SECS",
@@ -137,6 +178,8 @@ impl Config {
             turn_urls,
             stun_urls,
             credential_ttl: Duration::from_secs(ttl_secs),
+            host_enrollment_token,
+            trust_proxy_header,
         })
     }
 }
@@ -175,11 +218,92 @@ mod tests {
                 "NEXUS_TURN_URLS",
                 "turn:turn.nexus.example:3478?transport=udp".to_owned(),
             ),
+            ("NEXUS_HOST_ENROLLMENT_TOKEN", "t".repeat(MIN_SECRET_LEN)),
         ])
     }
 
     fn load(env: &HashMap<&'static str, String>) -> Result<Config, ConfigError> {
         Config::from_lookup(|name| env.get(name).cloned())
+    }
+
+    #[test]
+    fn the_enrollment_token_is_mandatory() {
+        let mut env = base_env();
+        env.remove("NEXUS_HOST_ENROLLMENT_TOKEN");
+        assert_eq!(
+            load(&env).unwrap_err(),
+            ConfigError::Missing {
+                name: "NEXUS_HOST_ENROLLMENT_TOKEN"
+            }
+        );
+    }
+
+    #[test]
+    fn a_short_enrollment_token_is_refused() {
+        let mut env = base_env();
+        env.insert("NEXUS_HOST_ENROLLMENT_TOKEN", "corto".to_owned());
+        assert_eq!(
+            load(&env).unwrap_err(),
+            ConfigError::SecretTooShort {
+                name: "NEXUS_HOST_ENROLLMENT_TOKEN",
+                min_len: MIN_SECRET_LEN
+            }
+        );
+    }
+
+    #[test]
+    fn reusing_the_turn_secret_as_enrollment_token_is_refused() {
+        // Dos secretos con proposito distinto no deben ser el mismo valor: si
+        // uno se filtra, el otro no debe caer con el.
+        let mut env = base_env();
+        let shared = "x".repeat(MIN_SECRET_LEN);
+        env.insert("NEXUS_TURN_SHARED_SECRET", shared.clone());
+        env.insert("NEXUS_HOST_ENROLLMENT_TOKEN", shared);
+        assert!(matches!(
+            load(&env).unwrap_err(),
+            ConfigError::Invalid {
+                name: "NEXUS_HOST_ENROLLMENT_TOKEN",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_proxy_header_is_not_trusted_by_default() {
+        // Confiar por omision permitiria falsear la direccion de origen y
+        // burlar el limite de intentos.
+        assert!(!load(&base_env()).expect("carga").trust_proxy_header);
+    }
+
+    #[test]
+    fn the_proxy_header_can_be_trusted_explicitly() {
+        for value in ["true", "1", "yes", "si", "TRUE"] {
+            let mut env = base_env();
+            env.insert("NEXUS_TRUST_PROXY_HEADER", value.to_owned());
+            assert!(
+                load(&env).expect("carga").trust_proxy_header,
+                "{value} deberia activarlo"
+            );
+        }
+        for value in ["false", "0", "no"] {
+            let mut env = base_env();
+            env.insert("NEXUS_TRUST_PROXY_HEADER", value.to_owned());
+            assert!(!load(&env).expect("carga").trust_proxy_header);
+        }
+    }
+
+    #[test]
+    fn an_unclear_proxy_header_setting_is_refused() {
+        // "quiza" no es una respuesta valida a una pregunta de seguridad.
+        let mut env = base_env();
+        env.insert("NEXUS_TRUST_PROXY_HEADER", "quiza".to_owned());
+        assert!(matches!(
+            load(&env).unwrap_err(),
+            ConfigError::Invalid {
+                name: "NEXUS_TRUST_PROXY_HEADER",
+                ..
+            }
+        ));
     }
 
     #[test]

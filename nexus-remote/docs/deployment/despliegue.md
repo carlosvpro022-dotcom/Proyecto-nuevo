@@ -59,14 +59,23 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edite `.env`. El valor que **no debe inventarse** es el secreto de TURN:
+Edite `.env`. Hay **dos secretos que no deben inventarse**, y tienen que ser
+distintos entre sí:
 
 ```bash
-openssl rand -base64 48
+openssl rand -base64 48   # para NEXUS_TURN_SHARED_SECRET
+openssl rand -base64 48   # para NEXUS_HOST_ENROLLMENT_TOKEN
 ```
 
-Péguelo en `NEXUS_TURN_SHARED_SECRET`. El servidor se niega a arrancar si tiene
-menos de 32 caracteres, y el contenedor de Coturn también lo comprueba.
+- `NEXUS_TURN_SHARED_SECRET` es el que comparten el servidor de señalización y
+  Coturn para derivar las credenciales temporales del relay.
+- `NEXUS_HOST_ENROLLMENT_TOKEN` es el que debe presentar un PC **la primera vez**
+  que se conecta como host. Sin él, cualquiera que alcance el servidor podría
+  registrar el identificador de su PC antes que su PC y quedarse con él
+  ([ADR-0011](../architecture/ADR-0011-directorio-de-identidades.md)).
+
+El servidor se niega a arrancar si alguno tiene menos de 32 caracteres o si son
+iguales. Coturn también comprueba el suyo.
 
 Todas las variables están documentadas una a una en `.env.example`.
 
@@ -103,8 +112,28 @@ curl https://nexus.midominio.com/v1/info
 # Debe mostrar "relay_configured": true
 ```
 
-Fíjese en que `/v1/info` lista `/v1/signaling` en `pending_endpoints`: ese canal
-llega en la etapa 3.
+Fíjese en dos campos de `/v1/info`:
+
+- `pending_endpoints` debe estar vacío. El canal `/v1/signaling` ya existe.
+- `pairing_relay` es `false` a propósito: este servidor no retransmite códigos
+  de emparejamiento, y el motivo está en
+  [ADR-0010](../architecture/ADR-0010-emparejamiento-por-red.md). Los
+  dispositivos nuevos se emparejan en la red local.
+
+**Que el canal de señalización acepta conexiones.** No basta con que responda
+`/v1/info`: hay que comprobar la mejora a WebSocket a través del proxy.
+
+```bash
+curl -i -N \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" \
+  https://nexus.midominio.com/v1/signaling
+```
+
+Debe contestar `101 Switching Protocols`. Un `404` significa que el proxy no
+está enrutando esa ruta; un `426` o un `400`, que la petición no llegó como
+mejora a WebSocket.
 
 **Que el TURN responde de verdad.** Es la comprobación que más se olvida y la
 que más problemas evita. Use la herramienta de prueba de WebRTC:
@@ -136,12 +165,27 @@ nc -zv nexus.midominio.com 5349
 En el panel del host, pantalla **Configuración**, escriba:
 
 ```
-wss://nexus.midominio.com/signaling
+wss://nexus.midominio.com/v1/signaling
 ```
 
 Debe empezar por `wss://`. El host rechaza cualquier otra cosa: sin TLS, la
 señalización expondría los identificadores de los dispositivos y los candidatos
 de red.
+
+Guarde la dirección y después pulse **Probar conexión**, pegando en el campo del
+testigo el valor de `NEXUS_HOST_ENROLLMENT_TOKEN`. Esa comprobación se conecta
+de verdad, se autentica, se declara disponible y le dice qué encontró:
+
+- **Conectado y disponible, con relay TURN**: el despliegue está bien.
+- **Conectado, pero sin relay**: funcionará dentro de su red y fallará desde una
+  red móvil con NAT simétrico. Revise `NEXUS_TURN_URLS` y el apartado 6.
+- **No se pudo hablar con el servidor**: dirección, servicio caído o
+  certificado. Mire `docker compose logs -f signaling`.
+- **El servidor rechazó la identidad**: falta el testigo, o es incorrecto.
+
+El testigo solo hace falta esa primera vez y **no se guarda** en el PC. A partir
+de entonces el servidor reconoce a este host por su clave pública, y rechaza a
+cualquiera que se presente con ese mismo identificador y otra clave.
 
 ## 8. Mantenimiento
 

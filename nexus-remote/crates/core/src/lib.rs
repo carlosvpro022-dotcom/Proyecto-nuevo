@@ -27,6 +27,7 @@ pub mod permissions;
 pub mod protocol;
 pub mod quality;
 pub mod session;
+pub mod text;
 pub mod time;
 
 pub use capabilities::{Capability, CapabilitySet};

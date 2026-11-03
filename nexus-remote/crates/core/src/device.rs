@@ -90,20 +90,11 @@ impl DeviceInfo {
     /// longitud. Si queda vacio se sustituye por la etiqueta de plataforma.
     #[must_use]
     pub fn sanitized_name(&self) -> String {
-        let cleaned: String = self
-            .display_name
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        if cleaned.is_empty() {
-            return self.platform.label().to_owned();
-        }
-
-        cleaned.chars().take(Self::MAX_NAME_LEN).collect()
+        crate::text::sanitize_line(
+            &self.display_name,
+            Self::MAX_NAME_LEN,
+            self.platform.label(),
+        )
     }
 }
 

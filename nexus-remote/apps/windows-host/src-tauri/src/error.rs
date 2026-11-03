@@ -40,6 +40,10 @@ pub enum HostError {
     /// Un valor recibido de la interfaz no es valido.
     #[error("valor invalido: {0}")]
     InvalidInput(String),
+
+    /// Un mensaje del protocolo no se pudo codificar o decodificar.
+    #[error("fallo de protocolo: {0}")]
+    Protocol(String),
 }
 
 impl From<rusqlite::Error> for HostError {
@@ -73,6 +77,7 @@ impl From<HostError> for UiError {
             HostError::UnknownDevice { .. } => "unknown_device",
             HostError::NoPairingOpen => "no_pairing_open",
             HostError::InvalidInput(_) => "invalid_input",
+            HostError::Protocol(_) => "protocol",
         };
         Self {
             code: code.to_owned(),

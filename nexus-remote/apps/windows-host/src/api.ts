@@ -107,6 +107,15 @@ export interface PermissionEntry {
 
 export type PermissionProfile = "view_only" | "standard" | "full";
 
+/** Resultado de intentar conectarse al servidor de senalizacion. */
+export interface SignalingProbe {
+  connected: boolean;
+  iceServers: number;
+  hasRelay: boolean;
+  supportsRemoteNetworks: boolean;
+  detail: string;
+}
+
 /** Error del backend ya traducido a algo mostrable. */
 export interface HostError {
   code: string;
@@ -170,6 +179,14 @@ interface RawDeviceSummary {
   permissions: string[];
 }
 
+interface RawSignalingProbe {
+  connected: boolean;
+  ice_servers: number;
+  has_relay: boolean;
+  supports_remote_networks: boolean;
+  detail: string;
+}
+
 interface RawPairingView {
   pairing_id: string;
   code: string;
@@ -205,6 +222,16 @@ function mapDevice(raw: RawDeviceSummary): DeviceSummary {
     revoked: raw.revoked,
     unattendedAccess: raw.unattended_access,
     permissions: raw.permissions,
+  };
+}
+
+function mapProbe(raw: RawSignalingProbe): SignalingProbe {
+  return {
+    connected: raw.connected,
+    iceServers: raw.ice_servers,
+    hasRelay: raw.has_relay,
+    supportsRemoteNetworks: raw.supports_remote_networks,
+    detail: raw.detail,
   };
 }
 
@@ -270,6 +297,20 @@ export const api = {
 
   async setSignalingUrl(url: string): Promise<void> {
     return call<void>("set_signaling_url", { url });
+  },
+
+  /**
+   * Intenta conectarse al servidor configurado y cuenta lo que pasa.
+   *
+   * El testigo de alta solo hace falta la primera vez que este host se conecta
+   * a un servidor. No se guarda en ningun sitio.
+   */
+  async checkSignaling(enrollmentToken?: string): Promise<SignalingProbe> {
+    return mapProbe(
+      await call<RawSignalingProbe>("check_signaling", {
+        enrollmentToken: enrollmentToken ?? null,
+      }),
+    );
   },
 
   async listMonitors(): Promise<MonitorInfo[]> {
