@@ -24,6 +24,26 @@ use crate::error::{HostError, HostResult};
 /// Version del esquema que entiende este binario.
 pub const SCHEMA_VERSION: i64 = 1;
 
+/// Una sesion del historial.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionRow {
+    /// Identificador de la sesion.
+    pub session_id: String,
+    /// Dispositivo que la tuvo.
+    pub device_id: String,
+    /// Nombre del dispositivo, si todavia existe.
+    ///
+    /// Es `None` cuando el dispositivo se borro despues: la sesion ocurrio y
+    /// no se oculta por eso.
+    pub device_name: Option<String>,
+    /// Cuando empezo.
+    pub started_at_ms: u64,
+    /// Cuando termino, si termino.
+    pub ended_at_ms: Option<u64>,
+    /// Motivo de cierre.
+    pub close_reason: Option<String>,
+}
+
 /// Almacen local del host.
 #[derive(Debug)]
 pub struct Store {
@@ -327,6 +347,39 @@ impl Store {
             params![session_id.to_string(), to_sqlite_ms(now), reason.name()],
         )?;
         Ok(())
+    }
+
+    /// Lista las sesiones mas recientes, de la mas nueva a la mas antigua.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Database`] si la lectura falla.
+    pub fn list_sessions(&self, limit: u32) -> HostResult<Vec<SessionRow>> {
+        let mut consulta = self.connection.prepare(
+            "SELECT s.id, s.device_id, d.display_name, s.started_at_ms,
+                    s.ended_at_ms, s.close_reason
+             FROM sessions s
+             LEFT JOIN devices d ON d.id = s.device_id
+             ORDER BY s.started_at_ms DESC
+             LIMIT ?1",
+        )?;
+
+        let filas = consulta.query_map(params![limit], |fila| {
+            Ok(SessionRow {
+                session_id: fila.get::<_, String>(0)?,
+                device_id: fila.get::<_, String>(1)?,
+                device_name: fila.get::<_, Option<String>>(2)?,
+                started_at_ms: from_sqlite_ms(fila.get::<_, i64>(3)?).0,
+                ended_at_ms: fila
+                    .get::<_, Option<i64>>(4)?
+                    .map(|ms| from_sqlite_ms(ms).0),
+                close_reason: fila.get::<_, Option<String>>(5)?,
+            })
+        })?;
+
+        filas
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| HostError::Database(e.to_string()))
     }
 
     /// Numero de sesiones registradas para un dispositivo.
@@ -653,6 +706,71 @@ mod tests {
             .expect("lee")
             .expect("existe");
         assert_eq!(loaded.last_seen, Some(Timestamp(NOW.0 + 500)));
+    }
+
+    #[test]
+    fn el_historial_se_lista_de_la_mas_nueva_a_la_mas_antigua() {
+        let store = Store::open_in_memory().expect("almacen");
+        let identidad = DeviceIdentity::generate(DeviceId::new());
+        let device = identidad.device_id();
+        store
+            .save_device(device, &record(&identidad, "iPad Pro"))
+            .expect("guarda");
+
+        let primera = nexus_core::SessionId::new();
+        let segunda = nexus_core::SessionId::new();
+        store
+            .log_session_start(primera, device, Timestamp(1_000), None)
+            .expect("primera");
+        store
+            .log_session_start(segunda, device, Timestamp(2_000), Some("192.0.2.5"))
+            .expect("segunda");
+        store
+            .log_session_end(
+                primera,
+                Timestamp(1_500),
+                nexus_core::CloseReason::PeerClosed,
+            )
+            .expect("cierra la primera");
+
+        let filas = store.list_sessions(10).expect("lista");
+        assert_eq!(filas.len(), 2);
+        assert_eq!(
+            filas[0].session_id,
+            segunda.to_string(),
+            "la mas nueva primero"
+        );
+        assert_eq!(filas[0].ended_at_ms, None, "sigue abierta");
+        assert_eq!(filas[1].ended_at_ms, Some(1_500));
+        assert_eq!(filas[1].close_reason.as_deref(), Some("peer_closed"));
+        assert!(filas[0].device_name.is_some());
+    }
+
+    #[test]
+    fn el_historial_respeta_el_limite() {
+        let store = Store::open_in_memory().expect("almacen");
+        let identidad = DeviceIdentity::generate(DeviceId::new());
+        let device = identidad.device_id();
+        store
+            .save_device(device, &record(&identidad, "iPad Pro"))
+            .expect("guarda");
+        for n in 0..5 {
+            store
+                .log_session_start(
+                    nexus_core::SessionId::new(),
+                    device,
+                    Timestamp(1_000 + n),
+                    None,
+                )
+                .expect("anota");
+        }
+        assert_eq!(store.list_sessions(3).expect("lista").len(), 3);
+    }
+
+    #[test]
+    fn un_historial_vacio_devuelve_una_lista_vacia() {
+        let store = Store::open_in_memory().expect("almacen");
+        assert!(store.list_sessions(10).expect("lista").is_empty());
     }
 
     #[test]

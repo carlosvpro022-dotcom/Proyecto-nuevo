@@ -21,6 +21,8 @@ import {
   type PairingView,
   type PermissionEntry,
   type PermissionProfile,
+  type RuntimeStatus,
+  type SessionRow,
   type SignalingProbe,
   type SystemStatus,
 } from "./api";
@@ -32,6 +34,7 @@ import { Pairing } from "./views/Pairing";
 import { Files, History } from "./views/Pendientes";
 import { RemoteDesktop } from "./views/RemoteDesktop";
 import { Security } from "./views/Security";
+import { Atender } from "./views/Atender";
 import { Settings } from "./views/Settings";
 
 type ViewId =
@@ -102,19 +105,34 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [probe, setProbe] = useState<SignalingProbe | null>(null);
   const [checking, setChecking] = useState(false);
+  const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
 
   const reload = useCallback(async () => {
     try {
-      const [summary, status, devices, features, catalog, pairing, engine] =
-        await Promise.all([
-          api.hostSummary(),
-          api.systemStatus(),
-          api.listDevices(),
-          api.featureMatrix(),
-          api.permissionCatalog(),
-          api.currentPairing(),
-          api.engineStatus(),
-        ]);
+      const [
+        summary,
+        status,
+        devices,
+        features,
+        catalog,
+        pairing,
+        engine,
+        runtimeStatus,
+        history,
+      ] = await Promise.all([
+        api.hostSummary(),
+        api.systemStatus(),
+        api.listDevices(),
+        api.featureMatrix(),
+        api.permissionCatalog(),
+        api.currentPairing(),
+        api.engineStatus(),
+        api.runtimeStatus(),
+        api.sessionHistory(),
+      ]);
+      setRuntime(runtimeStatus);
+      setSessions(history);
 
       // La enumeracion de monitores falla a proposito en las plataformas sin
       // backend. No es motivo para dejar el panel sin datos: se guarda el
@@ -203,7 +221,13 @@ export function App() {
       ...(data.monitors.length > 0 ? { badge: String(data.monitors.length) } : { badge: "E2" }),
     },
     { id: "files", label: "Archivos", icon: "files", ready: false, badge: "E5" },
-    { id: "history", label: "Historial", icon: "history", ready: false, badge: "E5" },
+    {
+      id: "history",
+      label: "Historial",
+      icon: "history",
+      ready: true,
+      ...(sessions.length > 0 ? { badge: String(sessions.length) } : {}),
+    },
     { id: "security", label: "Seguridad", icon: "security", ready: true },
     { id: "settings", label: "Configuracion", icon: "settings", ready: true },
   ];
@@ -247,6 +271,25 @@ export function App() {
       )}
 
       {view === "dashboard" && (
+        <div className="stack" style={{ marginBottom: "var(--space-5)" }}>
+          <Atender
+            status={runtime}
+            configured={(data.summary.signalingUrl ?? "").length > 0}
+            busy={busy}
+            onStart={(token) =>
+              void run(async () => {
+                setRuntime(await api.startHost(token.length > 0 ? token : undefined));
+              })
+            }
+            onStop={() =>
+              void run(async () => {
+                setRuntime(await api.stopHost());
+              })
+            }
+          />
+        </div>
+      )}
+      {view === "dashboard" && (
         <Dashboard summary={data.summary} status={data.status} features={data.features} />
       )}
 
@@ -282,7 +325,7 @@ export function App() {
         />
       )}
       {view === "files" && <Files features={data.features} />}
-      {view === "history" && <History features={data.features} />}
+      {view === "history" && <History sessions={sessions} />}
 
       {view === "security" && <Security devices={data.devices} catalog={data.catalog} />}
 

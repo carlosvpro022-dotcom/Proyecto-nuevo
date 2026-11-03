@@ -26,6 +26,8 @@ entorno real**, y lo que todavía no existe.
 | **Restricción de acceso al disco** | Solo las carpetas declaradas. Rechaza recorrido de directorios, enlaces que escapan y nombres reservados de Windows. |
 | **Servidor de señalización** | `/v1/signaling` completo: autenticación Ed25519 del dispositivo, directorio de identidades con testigo de alta, límite de intentos por dispositivo y por origen, enrutado entre los dos extremos, registro de conexiones. |
 | **Conexión cifrada entre dispositivos** | WebRTC de verdad: ICE encuentra camino, DTLS cifra y los canales `control` e `input` transportan órdenes. Comprobado de extremo a extremo: un toque enviado por un par llega al otro y se aplica. |
+| **El host atiende sesiones** | Se conecta solo, decide cada petición contra su registro local, comprueba quién hay al otro lado y sirve el canal de control. Reintenta con espera creciente si el enlace se cae. **No aplica ni una orden antes de autenticar al otro extremo.** |
+| **Historial de sesiones** | Cada sesión queda registrada con su dispositivo, su duración y por qué terminó. |
 | **Autenticación mutua atada al canal** | Cada extremo firma las dos huellas DTLS de la sesión. Si el servidor sustituye una para interceptar, la sesión se aborta ([ADR-0009](docs/architecture/ADR-0009-atadura-de-sesion.md)). |
 | **Credenciales TURN temporales** | Derivación HMAC-SHA1 compatible con Coturn, verificada contra un vector de prueba público. |
 | **Panel del host** | Aplicación Tauri con 8 pantallas. Muestra datos reales del equipo, y comprueba contra el servidor de verdad. |
@@ -84,16 +86,16 @@ de verdad al servidor configurado, y enseña lo que ocurrió.
 ### Verificación
 
 ```
-675 pruebas automatizadas, todas en verde
+712 pruebas automatizadas, todas en verde
   · nexus-security        131    criptografía, emparejamiento, antirreenvío, atadura de sesión
   · nexus-signaling       129    protocolo del canal, directorio de identidades, enrutado, registro
+  · nexus-windows-host    115    almacén, admisión de sesiones, bucle del host, comandos
   · nexus-core            108    protocolo, permisos, estados, limpieza de texto
-  · nexus-windows-host     84    almacén, identidad, sesión de control, comandos
   · nexus-input            44    tabla de teclas, coordenadas absolutas
   · nexus-transport        44    códec, ICE, cliente, traducción de configuración
   · nexus-capture          41    fotogramas, ritmo, enumeración de monitores
   · nexus-file-transfer    37    restricción de acceso, transferencias
-  · integración            36    recorridos completos, incluida una sesión real de extremo a extremo
+  · integración            49    recorridos completos, con el host del producto atendiendo
   · nexus-audio            14    formato, volumen
 
 cargo fmt            sin diferencias
@@ -102,6 +104,8 @@ panel                8 pantallas verificadas en Chromium con datos reales del ba
 cruce a Windows      clippy --target x86_64-pc-windows-gnu limpio en los 7 crates
 sesión completa      servidor real en un puerto local, ICE, DTLS, canal de datos y
                      un evento de entrada que llega al final de la cadena
+host atendiendo      el bucle del producto decide, autentica y sirve a un
+                     controlador real; y no toca el equipo si la firma no cuadra
 ```
 
 La última línea es la prueba que sostiene la etapa 3. No hay dobles de prueba

@@ -22,7 +22,7 @@ use crate::inject::UnsupportedInjector;
 /// # Errors
 ///
 /// En Windows, si no se pueden leer las metricas del escritorio virtual.
-pub fn default_injector() -> crate::error::InputResult<Box<dyn InputInjector>> {
+pub fn default_injector() -> crate::error::InputResult<Box<dyn InputInjector + Send>> {
     #[cfg(windows)]
     {
         Ok(Box::new(windows::WindowsInjector::new()?))

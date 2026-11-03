@@ -37,7 +37,23 @@ use crate::signaling::SignalingProbe;
 pub struct AppState {
     /// Servicio del host tras un cerrojo: los comandos llegan desde varios
     /// hilos y el servicio tiene estado mutable (el emparejamiento abierto).
-    pub host: Mutex<HostService>,
+    ///
+    /// Va en `Arc` porque la tarea que vigila el bucle del host tambien escribe
+    /// en el historial, y no puede tomar prestado el estado de Tauri.
+    pub host: std::sync::Arc<Mutex<HostService>>,
+    /// Bucle del host, si esta en marcha.
+    pub runtime: Mutex<Option<crate::supervisor::RuntimeHandle>>,
+}
+
+impl AppState {
+    /// Crea el estado con el servicio ya abierto.
+    #[must_use]
+    pub fn new(host: HostService) -> Self {
+        Self {
+            host: std::sync::Arc::new(Mutex::new(host)),
+            runtime: Mutex::new(None),
+        }
+    }
 }
 
 /// Resumen del host para el panel.
@@ -408,11 +424,29 @@ fn comunicacion() -> Vec<FeatureStatus> {
             detail: "ICE, DTLS y canal de datos comprobados de extremo a extremo: una orden                      enviada por un par llega cifrada al otro y se aplica.",
         },
         FeatureStatus {
+            key: "sessions",
+            label: "Atender sesiones",
+            state: Working,
+            stage: 3,
+            detail: "El host se conecta solo, decide cada peticion contra su registro de \
+                     dispositivos, comprueba quien hay al otro lado y sirve el canal de \
+                     control. Probado con un controlador real contra el bucle del producto.",
+        },
+        FeatureStatus {
             key: "session_binding",
             label: "Autenticacion mutua atada al canal cifrado",
             state: Working,
             stage: 3,
             detail: "Cada extremo firma las dos huellas DTLS de la sesion. Si el servidor                      sustituye una para interceptar, la sesion se aborta.",
+        },
+        FeatureStatus {
+            key: "reconnect",
+            label: "Reconexion automatica tras un corte",
+            state: Working,
+            stage: 3,
+            detail: "El bucle del host reintenta con espera creciente y vuelve a declararse \
+                     disponible solo. Tras un corte, la sesion hay que volver a abrirla desde \
+                     el dispositivo.",
         },
         FeatureStatus {
             key: "internet",
@@ -436,15 +470,6 @@ fn funciones_avanzadas() -> Vec<FeatureStatus> {
     use FeatureState::Pending;
 
     vec![
-        FeatureStatus {
-            key: "reconnect",
-            label: "Reconexion automatica tras un corte",
-            state: Pending,
-            stage: 5,
-            detail: "La politica de reintentos con espera creciente esta escrita y probada \
-                     (nexus-transport::link), pero nada la pone en marcha todavia: falta el \
-                     bucle que mantiene la sesion viva, que llega con la transmision.",
-        },
         FeatureStatus {
             key: "video",
             label: "Transmision de la pantalla al dispositivo",
@@ -545,6 +570,127 @@ pub async fn check_signaling(
     .await)
 }
 
+/// Arranca el bucle que atiende sesiones.
+///
+/// A partir de aqui el host esta localizable y un dispositivo emparejado puede
+/// abrir sesion. El bucle decide cada peticion contra el registro local, no
+/// contra lo que diga el servidor.
+///
+/// # Errors
+///
+/// - [`HostError::InvalidInput`] si ya esta en marcha o falta la direccion del
+///   servidor.
+/// - [`HostError::Security`] si la identidad del host no se puede reconstruir.
+#[tauri::command]
+pub fn start_host(
+    state: tauri::State<'_, AppState>,
+    enrollment_token: Option<String>,
+) -> CmdResult<crate::supervisor::RuntimeStatus> {
+    {
+        let marcha = lock(&state.runtime);
+        if marcha.as_ref().is_some_and(|h| h.status().running) {
+            return Err(crate::supervisor::already_running().into());
+        }
+    }
+
+    let (config, identity) = with_host(&state, |host| {
+        let url = host.signaling_url()?.ok_or_else(|| {
+            HostError::InvalidInput(
+                "falta configurar la direccion del servidor de senalizacion".to_owned(),
+            )
+        })?;
+        // Los monitores se leen al arrancar: una sesion no puede resolver
+        // coordenadas sin saber como esta la pantalla.
+        let monitors = host.list_monitors().unwrap_or_else(|error| {
+            tracing::warn!(%error, "sin monitores detectados; se usara una pantalla ficticia");
+            nexus_core::MonitorLayout(Vec::new())
+        });
+        Ok((
+            crate::runtime::RuntimeConfig {
+                url,
+                device: host.describe_self(),
+                enrollment_token,
+                monitors,
+            },
+            host.duplicate_identity()?,
+        ))
+    })?;
+
+    let (shutdown, status, handle) = crate::supervisor::prepare();
+    let (events, inbox) = tokio::sync::mpsc::channel(64);
+
+    let runtime = crate::runtime::HostRuntime::new(
+        config,
+        identity,
+        std::sync::Arc::new(crate::supervisor::StoreLookup::new(std::sync::Arc::clone(
+            &state.host,
+        ))),
+        std::sync::Arc::new(crate::runtime::PlatformInjectors),
+        events,
+    );
+
+    let compartido = std::sync::Arc::clone(&state.host);
+    let estado = std::sync::Arc::clone(&status);
+    tauri::async_runtime::spawn(async move {
+        crate::supervisor::consume(inbox, estado, compartido).await;
+    });
+    tauri::async_runtime::spawn(async move {
+        runtime
+            .run(async {
+                let _ = shutdown.await;
+            })
+            .await;
+    });
+
+    let resumen = handle.status();
+    *lock(&state.runtime) = Some(handle);
+    Ok(resumen)
+}
+
+/// Deja de atender sesiones.
+///
+/// La sesion en curso, si la hay, se cierra de forma ordenada.
+///
+/// # Errors
+///
+/// No falla.
+#[tauri::command]
+pub fn stop_host(state: tauri::State<'_, AppState>) -> CmdResult<crate::supervisor::RuntimeStatus> {
+    let mut marcha = lock(&state.runtime);
+    if let Some(handle) = marcha.as_mut() {
+        handle.stop();
+    }
+    *marcha = None;
+    Ok(crate::supervisor::RuntimeStatus::stopped())
+}
+
+/// Devuelve que esta haciendo el bucle del host.
+///
+/// # Errors
+///
+/// No falla.
+#[tauri::command]
+pub fn runtime_status(
+    state: tauri::State<'_, AppState>,
+) -> CmdResult<crate::supervisor::RuntimeStatus> {
+    Ok(lock(&state.runtime).as_ref().map_or_else(
+        crate::supervisor::RuntimeStatus::stopped,
+        crate::supervisor::RuntimeHandle::status,
+    ))
+}
+
+/// Devuelve las sesiones mas recientes del historial.
+///
+/// # Errors
+///
+/// [`HostError::Database`] si la lectura falla.
+#[tauri::command]
+pub fn session_history(
+    state: tauri::State<'_, AppState>,
+) -> CmdResult<Vec<crate::store::SessionRow>> {
+    with_host(&state, |host| host.store().list_sessions(100))
+}
+
 /// Devuelve el catalogo de permisos para la pantalla de seguridad.
 #[tauri::command]
 pub fn permission_catalog() -> Vec<serde_json::Value> {
@@ -558,6 +704,13 @@ pub fn permission_catalog() -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// Toma un cerrojo recuperando el estado si estaba envenenado.
+fn lock<T>(cerrojo: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    cerrojo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn with_host<T, F>(state: &tauri::State<'_, AppState>, action: F) -> CmdResult<T>

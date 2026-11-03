@@ -26,13 +26,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admission;
 pub mod commands;
 pub mod error;
 pub mod host;
 pub mod identity;
+pub mod runtime;
 pub mod session;
 pub mod signaling;
 pub mod store;
+pub mod supervisor;
 pub mod system;
 
 pub use error::{HostError, HostResult, UiError};
@@ -68,9 +71,7 @@ pub fn run() {
         "host listo"
     );
 
-    let state = commands::AppState {
-        host: std::sync::Mutex::new(service),
-    };
+    let state = commands::AppState::new(service);
 
     tauri::Builder::default()
         .manage(state)
@@ -88,6 +89,10 @@ pub fn run() {
             commands::list_monitors,
             commands::engine_status,
             commands::check_signaling,
+            commands::start_host,
+            commands::stop_host,
+            commands::runtime_status,
+            commands::session_history,
             commands::feature_matrix,
             commands::permission_catalog,
         ])

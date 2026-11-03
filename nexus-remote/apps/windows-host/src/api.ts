@@ -107,6 +107,35 @@ export interface PermissionEntry {
 
 export type PermissionProfile = "view_only" | "standard" | "full";
 
+/** Sesion en curso, tal como la informa el bucle del host. */
+export interface ActiveSession {
+  sessionId: string;
+  controller: string;
+  permissions: string[];
+  startedAtMs: number;
+}
+
+/** Que esta haciendo el bucle que atiende sesiones. */
+export interface RuntimeStatus {
+  running: boolean;
+  available: boolean;
+  hasRelay: boolean;
+  detail: string;
+  activeSession: ActiveSession | null;
+  sessionsServed: number;
+  sessionsRefused: number;
+}
+
+/** Una sesion del historial. */
+export interface SessionRow {
+  session_id: string;
+  device_id: string;
+  device_name: string | null;
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  close_reason: string | null;
+}
+
 /** Resultado de intentar conectarse al servidor de senalizacion. */
 export interface SignalingProbe {
   connected: boolean;
@@ -179,6 +208,23 @@ interface RawDeviceSummary {
   permissions: string[];
 }
 
+interface RawActiveSession {
+  session_id: string;
+  controller: string;
+  permissions: string[];
+  started_at_ms: number;
+}
+
+interface RawRuntimeStatus {
+  running: boolean;
+  available: boolean;
+  has_relay: boolean;
+  detail: string;
+  active_session: RawActiveSession | null;
+  sessions_served: number;
+  sessions_refused: number;
+}
+
 interface RawSignalingProbe {
   connected: boolean;
   ice_servers: number;
@@ -222,6 +268,25 @@ function mapDevice(raw: RawDeviceSummary): DeviceSummary {
     revoked: raw.revoked,
     unattendedAccess: raw.unattended_access,
     permissions: raw.permissions,
+  };
+}
+
+function mapRuntime(raw: RawRuntimeStatus): RuntimeStatus {
+  return {
+    running: raw.running,
+    available: raw.available,
+    hasRelay: raw.has_relay,
+    detail: raw.detail,
+    activeSession: raw.active_session
+      ? {
+          sessionId: raw.active_session.session_id,
+          controller: raw.active_session.controller,
+          permissions: raw.active_session.permissions,
+          startedAtMs: raw.active_session.started_at_ms,
+        }
+      : null,
+    sessionsServed: raw.sessions_served,
+    sessionsRefused: raw.sessions_refused,
   };
 }
 
@@ -311,6 +376,32 @@ export const api = {
         enrollmentToken: enrollmentToken ?? null,
       }),
     );
+  },
+
+  /**
+   * Arranca el bucle que atiende sesiones.
+   *
+   * A partir de aqui el equipo esta localizable y un dispositivo emparejado
+   * puede abrir sesion.
+   */
+  async startHost(enrollmentToken?: string): Promise<RuntimeStatus> {
+    return mapRuntime(
+      await call<RawRuntimeStatus>("start_host", {
+        enrollmentToken: enrollmentToken ?? null,
+      }),
+    );
+  },
+
+  async stopHost(): Promise<RuntimeStatus> {
+    return mapRuntime(await call<RawRuntimeStatus>("stop_host"));
+  },
+
+  async runtimeStatus(): Promise<RuntimeStatus> {
+    return mapRuntime(await call<RawRuntimeStatus>("runtime_status"));
+  },
+
+  async sessionHistory(): Promise<SessionRow[]> {
+    return call<SessionRow[]>("session_history");
   },
 
   async listMonitors(): Promise<MonitorInfo[]> {

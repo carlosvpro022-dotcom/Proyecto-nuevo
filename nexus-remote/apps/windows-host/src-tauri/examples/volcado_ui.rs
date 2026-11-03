@@ -78,6 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // mismo caso, que es el que vera quien desarrolle aqui.
         "list_monitors": host.list_monitors().map(|layout| layout.0).unwrap_or_default(),
         "permission_catalog": permission_catalog(),
+        // El bucle no esta en marcha en el volcado: lo que se comprueba es que
+        // el panel pinta bien ese caso, que es el primero que vera cualquiera.
+        "runtime_status": nexus_windows_host::supervisor::RuntimeStatus::stopped(),
+        "session_history": host.store().list_sessions(100)?,
         "current_pairing": {
             "pairing_id": session.id.to_string(),
             "code": code.grouped(),

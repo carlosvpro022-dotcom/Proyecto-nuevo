@@ -7,8 +7,8 @@
  * funciona.
  */
 
-import type { FeatureStatus } from "../api";
-import { Pending } from "../components/ui";
+import { formatMoment, type FeatureStatus, type SessionRow } from "../api";
+import { Card, Notice, Pending } from "../components/ui";
 
 function detailFor(features: FeatureStatus[], key: string, fallback: string): string {
   return features.find((f) => f.key === key)?.detail ?? fallback;
@@ -35,20 +35,91 @@ export function Files({ features }: { features: FeatureStatus[] }) {
   );
 }
 
-export function History({ features }: { features: FeatureStatus[] }) {
-  return (
-    <div className="stack">
-      <Pending
+export function History({ sessions }: { sessions: SessionRow[] }) {
+  if (sessions.length === 0) {
+    return (
+      <Card
         title="Historial de sesiones"
-        stage={stageFor(features, "video", 5)}
-        detail={
-          "La tabla de sesiones y su registro ya existen en la base de datos local, " +
-          "con dispositivo, duracion y motivo de cierre. Esta vacia porque el host " +
-          "todavia no mantiene sesiones abiertas: la conexion y la senalizacion ya " +
-          "funcionan, pero falta el bucle que atiende una sesion mientras dura."
-        }
-        dependsOn="El bucle de sesion del host, que llega con la transmision de pantalla"
-      />
-    </div>
+        hint="Cada sesion atendida queda registrada con su dispositivo, su duracion y por que termino."
+      >
+        <Notice>
+          Todavia no se ha atendido ninguna sesion. Empiece a atender en el{" "}
+          <em>Panel</em> y conecte un dispositivo emparejado.
+        </Notice>
+      </Card>
+    );
+  }
+
+  return (
+    <Card
+      title="Historial de sesiones"
+      hint="De la mas reciente a la mas antigua. Las ultimas cien."
+    >
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Dispositivo</th>
+            <th>Empezo</th>
+            <th>Duracion</th>
+            <th>Termino</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sessions.map((sesion) => (
+            <tr key={sesion.session_id}>
+              <td>
+                <div style={{ fontWeight: 560 }}>
+                  {sesion.device_name ?? "Dispositivo eliminado"}
+                </div>
+                <div className="mono" style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                  {sesion.device_id.slice(0, 8)}
+                </div>
+              </td>
+              <td style={{ color: "var(--text-secondary)" }}>
+                {formatMoment(sesion.started_at_ms)}
+              </td>
+              <td className="mono">{duracion(sesion)}</td>
+              <td style={{ color: "var(--text-secondary)" }}>
+                {motivo(sesion.close_reason)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
   );
+}
+
+/** Cuanto duro, o que sigue abierta. */
+function duracion(sesion: SessionRow): string {
+  if (sesion.ended_at_ms === null) return "en curso";
+  const segundos = Math.max(0, Math.round((sesion.ended_at_ms - sesion.started_at_ms) / 1000));
+  if (segundos < 60) return `${segundos} s`;
+  const minutos = Math.floor(segundos / 60);
+  if (minutos < 60) return `${minutos} min`;
+  return `${Math.floor(minutos / 60)} h ${minutos % 60} min`;
+}
+
+/** Traduce el motivo de cierre que guarda la base de datos. */
+function motivo(reason: string | null): string {
+  switch (reason) {
+    case null:
+      return "sigue abierta";
+    case "user_requested":
+      return "la cerro una persona";
+    case "peer_closed":
+      return "se desconecto el dispositivo";
+    case "authentication_failed":
+      return "no se pudo comprobar la identidad";
+    case "network_lost":
+      return "se perdio la red";
+    case "device_revoked":
+      return "se revoco el dispositivo";
+    case "host_policy":
+      return "la corto este equipo";
+    case "internal_error":
+      return "error interno";
+    default:
+      return reason;
+  }
 }
