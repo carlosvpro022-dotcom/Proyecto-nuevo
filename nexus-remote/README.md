@@ -84,7 +84,7 @@ de verdad al servidor configurado, y enseña lo que ocurrió.
 ### Verificación
 
 ```
-673 pruebas automatizadas, todas en verde
+675 pruebas automatizadas, todas en verde
   · nexus-security        131    criptografía, emparejamiento, antirreenvío, atadura de sesión
   · nexus-signaling       129    protocolo del canal, directorio de identidades, enrutado, registro
   · nexus-core            108    protocolo, permisos, estados, limpieza de texto
@@ -93,7 +93,7 @@ de verdad al servidor configurado, y enseña lo que ocurrió.
   · nexus-transport        44    códec, ICE, cliente, traducción de configuración
   · nexus-capture          41    fotogramas, ritmo, enumeración de monitores
   · nexus-file-transfer    37    restricción de acceso, transferencias
-  · integración            34    recorridos completos, incluida una sesión real de extremo a extremo
+  · integración            36    recorridos completos, incluida una sesión real de extremo a extremo
   · nexus-audio            14    formato, volumen
 
 cargo fmt            sin diferencias
@@ -267,6 +267,16 @@ conecta de verdad y dice qué encontró, incluido si el relay TURN está sirvien
 
 Luego cliente Apple (4), funciones avanzadas (5) y producción (6). Ninguna
 avanza hasta que la anterior funcione.
+
+### Comprobar un servidor ya desplegado
+
+```bash
+cargo run -p nexus-windows-host --example comprobar_servidor -- \
+  wss://su-dominio/v1/signaling "$NEXUS_HOST_ENROLLMENT_TOKEN"
+```
+
+Se conecta de verdad, se autentica y se declara disponible. Devuelve 0 solo si
+además hay relay TURN, así que vale para un script de comprobación.
 
 ### Probar el canal de señalización sin servidor
 

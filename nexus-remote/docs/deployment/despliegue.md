@@ -94,6 +94,26 @@ certificados al renovarse**: hay que reiniciarlo. Añada una tarea mensual:
 
 ## 5. Arranque
 
+Antes de levantar nada, compruebe que la configuración se interpreta como
+espera. Las dos órdenes son rápidas y evitan descubrir un error con el
+servicio a medio arrancar:
+
+```bash
+# Resuelve el compose entero y falla si falta alguna variable obligatoria.
+docker compose config > /dev/null && echo "compose correcto"
+
+# Valida la sintaxis del proxy inverso.
+docker compose run --rm --entrypoint caddy caddy \
+  validate --adapter caddyfile --config /etc/caddy/Caddyfile
+```
+
+> La segunda hay que ejecutarla en su servidor: en el entorno donde se
+> desarrolla este proyecto no hay un Caddy con el que comprobarlo, de modo que
+> el `Caddyfile` **no está validado**. Si da un error de sintaxis, dígamelo con
+> el texto exacto.
+
+Y ya:
+
 ```bash
 docker compose up -d
 docker compose ps
@@ -152,6 +172,20 @@ USER="$(( $(date +%s) + 3600 )):prueba"
 echo "usuario: $USER"
 echo -n "$USER" | openssl dgst -binary -sha1 -hmac "$SECRET" | openssl base64
 ```
+
+**La comprobación completa, de una vez.** Hay una herramienta que hace lo
+mismo que el botón del panel: se conecta, se autentica con una identidad
+efímera y se declara disponible como host.
+
+```bash
+cargo run -p nexus-windows-host --example comprobar_servidor -- \
+  wss://nexus.midominio.com/v1/signaling "$NEXUS_HOST_ENROLLMENT_TOKEN"
+```
+
+Termina con código de salida 0 solo si se conectó **y** el servidor entregó
+relay TURN, así que sirve tal cual en un script de comprobación. La identidad
+que usa es de usar y tirar; lo único que deja es su alta en el directorio del
+servidor.
 
 **Que el puerto está realmente abierto**, desde otra máquina:
 

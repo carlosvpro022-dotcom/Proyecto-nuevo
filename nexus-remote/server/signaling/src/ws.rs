@@ -40,7 +40,7 @@ use nexus_core::protocol::signaling::{AuthRejection, ClientToServer, ServerToCli
 use nexus_core::{CapabilitySet, DeviceId, DeviceInfo, PermissionSet, SessionId, Timestamp};
 use nexus_security::registry::{AuthRequest, DeviceRegistry};
 use nexus_security::{AuthRole, DevicePublicKey, Nonce, SecurityError};
-use nexus_transport::codec::{decode_client_message, encode_server_message};
+use nexus_transport::codec::{MAX_MESSAGE_BYTES, decode_client_message, encode_server_message};
 use tokio::sync::mpsc;
 
 use crate::audit::{AuditEvent, AuthResult};
@@ -858,7 +858,18 @@ pub async fn handler(
             .into_response();
     }
 
-    ws.on_upgrade(move |socket| connection_loop(socket, state, remote))
+    // El limite de tamano se pone **aqui**, en la capa WebSocket, y no solo al
+    // decodificar. Por omision axum admite mensajes de 64 MB, de modo que un
+    // cliente sin autenticar podria hacer que el servidor reservase esa memoria
+    // por conexion antes de que nadie mirase el contenido. Con el tope puesto,
+    // un marco mayor se rechaza sin llegar a almacenarse.
+    //
+    // El tope es el mismo que usa el codec, que ya tiene margen de sobra para
+    // el mensaje mas grande del protocolo (una descripcion SDP con muchos
+    // candidatos ronda unos pocos kilobytes).
+    ws.max_message_size(MAX_MESSAGE_BYTES)
+        .max_frame_size(MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| connection_loop(socket, state, remote))
 }
 
 /// Direccion de origen con la que se identifica la conexion.

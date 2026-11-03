@@ -2579,6 +2579,7 @@ dependencies = [
 name = "nexus-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "nexus-capture",
  "nexus-core",
  "nexus-file-transfer",
@@ -2590,6 +2591,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.30.0",
 ]
 
 [[package]]

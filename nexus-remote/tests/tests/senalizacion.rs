@@ -456,3 +456,72 @@ async fn la_comprobacion_avisa_cuando_no_hay_relay() {
     assert!(probe.has_relay);
     assert!(probe.detail.contains("relay"), "{}", probe.detail);
 }
+
+#[tokio::test]
+async fn un_marco_enorme_se_corta_sin_llegar_a_almacenarse() {
+    // El tope de 64 KiB tiene que estar en la capa WebSocket, no solo al
+    // decodificar. Por omision axum admite mensajes de 64 MB: sin este tope, un
+    // cliente sin autenticar podria hacer que el servidor reservase esa memoria
+    // por conexion antes de que nadie mirase el contenido.
+    //
+    // Por eso esta prueba usa un cliente WebSocket crudo y no el del proyecto:
+    // el nuestro se niega a codificar un mensaje asi, que es justo lo que hay
+    // que saltarse para comprobar al servidor.
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let server = TestServer::start().await;
+    let (mut socket, _) = tokio_tungstenite::connect_async(&server.url)
+        .await
+        .expect("el canal acepta la conexion");
+
+    let enorme = "x".repeat(1024 * 1024);
+    // El envio puede fallar ya aqui, si el servidor corta mientras se escribe.
+    let enviado = socket.send(Message::Text(enorme.into())).await;
+
+    // Lo que no puede pasar es que el servidor conteste un error de protocolo,
+    // porque eso significaria que almaceno el megabyte entero para mirarlo.
+    let respuesta = tokio::time::timeout(STEP_TIMEOUT, socket.next()).await;
+    let contesto_error = matches!(
+        &respuesta,
+        Ok(Some(Ok(Message::Text(texto)))) if texto.contains("bad_request")
+    );
+
+    assert!(
+        !contesto_error,
+        "el servidor no debe procesar un marco de 1 MiB: tiene que cortarlo antes"
+    );
+    let se_corto = enviado.is_err()
+        || matches!(
+            respuesta,
+            Err(_) | Ok(None | Some(Err(_) | Ok(Message::Close(_))))
+        );
+    assert!(se_corto, "la conexion deberia cerrarse: {respuesta:?}");
+
+    // Y el servidor sigue atendiendo a los demas.
+    let controller = Device::controller("iPad Pro");
+    let (_cliente, _) = controller.connect_ok(&server, None).await;
+}
+
+#[tokio::test]
+async fn un_marco_binario_cierra_la_conexion() {
+    // El protocolo es texto. Un marco binario no es un mensaje que no se
+    // entienda: es un cliente que no habla este protocolo.
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let server = TestServer::start().await;
+    let (mut socket, _) = tokio_tungstenite::connect_async(&server.url)
+        .await
+        .expect("el canal acepta la conexion");
+
+    socket
+        .send(Message::Binary(vec![0, 1, 2].into()))
+        .await
+        .expect("envia");
+
+    match tokio::time::timeout(STEP_TIMEOUT, socket.next()).await {
+        Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => {}
+        otro => panic!("se esperaba un cierre, llego {otro:?}"),
+    }
+}
