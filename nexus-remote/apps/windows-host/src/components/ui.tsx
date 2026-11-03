@@ -7,7 +7,7 @@
 
 import type { ReactNode } from "react";
 
-import type { FeatureStatus } from "../api";
+import { featureStateLabel, type FeatureStatus } from "../api";
 
 export type Tone = "ok" | "warn" | "danger" | "idle" | "accent";
 
@@ -117,18 +117,27 @@ export function Pending({
   );
 }
 
+/**
+ * Una funcion con su estado de verificacion.
+ *
+ * Los tres estados se distinguen a proposito: "sin probar" significa que el
+ * codigo existe y compila para Windows, pero nunca se ha ejecutado alli.
+ * Mostrarlo igual que "probado" induciria a error.
+ */
 export function FeatureRow({ feature }: { feature: FeatureStatus }) {
+  const tone: Tone =
+    feature.state === "working" ? "ok" : feature.state === "unverified" ? "warn" : "idle";
+
   return (
     <div className="feature">
       <div className="feature__body">
         <div className="feature__name">{feature.label}</div>
         <div className="feature__detail">{feature.detail}</div>
       </div>
-      {feature.ready ? (
-        <Pill tone="ok">Funciona</Pill>
-      ) : (
-        <Pill tone="idle">Etapa {feature.stage}</Pill>
-      )}
+      <Pill tone={tone}>
+        {featureStateLabel(feature.state)}
+        {feature.state !== "working" && ` · E${feature.stage}`}
+      </Pill>
     </div>
   );
 }

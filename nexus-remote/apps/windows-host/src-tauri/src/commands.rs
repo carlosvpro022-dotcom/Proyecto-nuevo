@@ -30,7 +30,7 @@ use nexus_core::{DeviceId, MonitorLayout, Permission, PermissionSet, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{HostError, UiError};
-use crate::host::{HostService, pairing_ttl};
+use crate::host::{EngineStatus, HostService, pairing_ttl};
 
 /// Estado compartido de la aplicacion Tauri.
 pub struct AppState {
@@ -126,18 +126,35 @@ impl From<PermissionProfile> for PermissionSet {
     }
 }
 
-/// Una funcion que el panel puede usar y en que etapa estara lista.
+/// Hasta donde esta verificada una funcion.
+///
+/// Los tres valores corresponden a los niveles de verificacion del ADR-0007.
+/// Un booleano no bastaria: hay codigo escrito y compilado para Windows que
+/// nunca se ha ejecutado alli, y llamarlo "listo" seria mentir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureState {
+    /// Implementada y probada ejecutandola. Nivel 1.
+    Working,
+    /// Implementada y compilada para Windows, pero **nunca ejecutada alli**.
+    /// Nivel 2: el compilador verifico tipos y firmas, no el comportamiento.
+    Unverified,
+    /// Todavia no implementada.
+    Pending,
+}
+
+/// Una funcion que el panel puede usar y hasta donde esta verificada.
 #[derive(Debug, Serialize)]
 pub struct FeatureStatus {
     /// Clave estable de la funcion.
     pub key: &'static str,
     /// Nombre legible.
     pub label: &'static str,
-    /// Si ya funciona.
-    pub ready: bool,
+    /// Hasta donde esta verificada.
+    pub state: FeatureState,
     /// Etapa en la que se implementa.
     pub stage: u8,
-    /// Que falta exactamente.
+    /// Que falta exactamente, o que queda por comprobar.
     pub detail: &'static str,
 }
 
@@ -293,92 +310,111 @@ pub fn list_monitors(state: tauri::State<'_, AppState>) -> CmdResult<MonitorLayo
 /// pendiente dice en que etapa llega y que le falta.
 #[tauri::command]
 pub fn feature_matrix() -> Vec<FeatureStatus> {
+    use FeatureState::{Pending, Unverified, Working};
+
     vec![
         FeatureStatus {
             key: "identity",
             label: "Identidad criptografica del host",
-            ready: true,
+            state: Working,
             stage: 1,
             detail: "Par Ed25519 propio, persistente entre arranques.",
         },
         FeatureStatus {
             key: "pairing",
             label: "Emparejamiento por codigo y QR",
-            ready: true,
+            state: Working,
             stage: 1,
             detail: "Codigo temporal derivado con Argon2id, 5 intentos y 5 minutos de validez.",
         },
         FeatureStatus {
             key: "devices",
             label: "Dispositivos autorizados y revocacion",
-            ready: true,
+            state: Working,
             stage: 1,
             detail: "Lista blanca en SQLite con permisos por dispositivo.",
         },
         FeatureStatus {
             key: "system_info",
             label: "Informacion del equipo",
-            ready: true,
+            state: Working,
             stage: 1,
             detail: "Datos reales del sistema. Falta detectar si la sesion esta bloqueada.",
         },
         FeatureStatus {
+            key: "monitors",
+            label: "Deteccion de monitores",
+            state: Unverified,
+            stage: 2,
+            detail: "Implementada con EnumDisplayMonitors, GetDpiForMonitor y                      EnumDisplaySettingsW. Compila para Windows; falta ejecutarla en un PC real.",
+        },
+        FeatureStatus {
             key: "capture",
             label: "Captura de pantalla",
-            ready: false,
+            state: Unverified,
             stage: 2,
-            detail: "Falta el backend de Windows Graphics Capture y la enumeracion de monitores.",
+            detail: "Implementada con Windows Graphics Capture y Direct3D 11. Compila para                      Windows; falta comprobar los fotogramas en un PC real.",
         },
         FeatureStatus {
             key: "input",
             label: "Control de raton y teclado",
-            ready: false,
+            state: Unverified,
             stage: 2,
-            detail: "La validacion y traduccion de eventos esta lista; falta inyectar con SendInput.",
+            detail: "Implementada con SendInput, con tabla de teclas y coordenadas absolutas                      probadas aparte. Compila para Windows; falta comprobarla en un PC real.",
         },
         FeatureStatus {
             key: "signaling",
             label: "Conexion con el servidor propio",
-            ready: false,
+            state: Pending,
             stage: 3,
             detail: "Falta el WebSocket /v1/signaling en el servidor y el cliente en el host.",
         },
         FeatureStatus {
             key: "webrtc",
             label: "Sesion remota por WebRTC",
-            ready: false,
+            state: Pending,
             stage: 3,
             detail: "Falta la negociacion ICE y los canales de medios y datos.",
         },
         FeatureStatus {
             key: "audio",
             label: "Audio del sistema",
-            ready: false,
+            state: Pending,
             stage: 5,
             detail: "Formato y control de volumen listos; falta la captura WASAPI en modo bucle.",
         },
         FeatureStatus {
             key: "files",
             label: "Transferencia de archivos",
-            ready: false,
+            state: Pending,
             stage: 5,
             detail: "Restriccion de acceso y contabilidad listas; falta mover bytes por el canal de datos.",
         },
         FeatureStatus {
             key: "clipboard",
             label: "Portapapeles compartido",
-            ready: false,
+            state: Pending,
             stage: 5,
             detail: "Protocolo y permisos definidos; falta leer y escribir el portapapeles de Windows.",
         },
         FeatureStatus {
             key: "power",
             label: "Bloquear, reiniciar y apagar",
-            ready: false,
+            state: Pending,
             stage: 5,
             detail: "Permisos y confirmacion definidos; faltan las llamadas al sistema.",
         },
     ]
+}
+
+/// Comprueba si este equipo puede capturar la pantalla e inyectar entrada.
+///
+/// A diferencia de [`feature_matrix`], que describe el estado del proyecto,
+/// esto comprueba **este equipo concreto ahora mismo**: intenta enumerar las
+/// pantallas y crear el inyector, y devuelve lo que ocurrio.
+#[tauri::command]
+pub fn engine_status(state: tauri::State<'_, AppState>) -> CmdResult<EngineStatus> {
+    with_host(&state, |host| Ok(host.engine_status()))
 }
 
 /// Devuelve el catalogo de permisos para la pantalla de seguridad.
@@ -476,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn the_feature_matrix_is_consistent_with_the_stage_plan() {
+    fn la_matriz_de_funciones_es_coherente_con_el_plan_de_etapas() {
         let matrix = feature_matrix();
         assert!(!matrix.is_empty());
 
@@ -492,19 +528,64 @@ mod tests {
                 feature.key,
                 feature.stage
             );
-            // Lo que ya funciona pertenece a la etapa 1; si algo de una etapa
-            // posterior se marcara listo, esta prueba lo detecta.
-            if feature.ready {
-                assert_eq!(
+
+            match feature.state {
+                // Solo lo de la etapa 1 se ha podido ejecutar y probar aqui.
+                FeatureState::Working => assert_eq!(
                     feature.stage, 1,
-                    "{} dice estar listo en etapa {}",
+                    "{} dice estar probado y es de la etapa {}",
                     feature.key, feature.stage
-                );
+                ),
+                // "Sin verificar" significa escrito para Windows: etapa 2.
+                FeatureState::Unverified => assert_eq!(
+                    feature.stage, 2,
+                    "{} dice estar escrito sin probar y es de la etapa {}",
+                    feature.key, feature.stage
+                ),
+                FeatureState::Pending => assert!(
+                    feature.stage >= 3,
+                    "{} dice estar pendiente y es de la etapa {}",
+                    feature.key,
+                    feature.stage
+                ),
             }
         }
+    }
 
-        let ready: Vec<_> = matrix.iter().filter(|f| f.ready).map(|f| f.key).collect();
-        assert_eq!(ready, vec!["identity", "pairing", "devices", "system_info"]);
+    #[test]
+    fn nada_de_la_etapa_2_se_declara_probado() {
+        // Es la salvaguarda contra el error mas facil de cometer: marcar como
+        // terminado codigo de Windows que nunca se ha ejecutado en Windows.
+        for feature in feature_matrix().iter().filter(|f| f.stage == 2) {
+            assert_eq!(
+                feature.state,
+                FeatureState::Unverified,
+                "{} no puede declararse probado sin ejecutarlo en Windows",
+                feature.key
+            );
+            assert!(
+                feature.detail.contains("falta") || feature.detail.contains("Falta"),
+                "{} deberia decir que falta comprobarlo: {}",
+                feature.key,
+                feature.detail
+            );
+        }
+    }
+
+    #[test]
+    fn los_estados_se_serializan_como_los_espera_el_panel() {
+        assert_eq!(
+            serde_json::to_string(&FeatureState::Working).expect("ok"),
+            "\"working\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FeatureState::Unverified).expect("ok"),
+            "\"unverified\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FeatureState::Pending).expect("ok"),
+            "\"pending\""
+        );
     }
 
     #[test]

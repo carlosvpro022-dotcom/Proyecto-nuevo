@@ -2,8 +2,8 @@
 //!
 //! # Estado de implementacion
 //!
-//! El backend de Windows (Windows Graphics Capture) corresponde a la etapa 2.
-//! Aqui viven el contrato y dos implementaciones auxiliares:
+//! El backend de Windows vive en [`crate::platform::windows_capture`]. Aqui
+//! viven el contrato y dos implementaciones auxiliares:
 //!
 //! - [`UnsupportedCapturer`]: falla de forma explicita. Es lo que usa el host
 //!   cuando se compila para una plataforma sin captura, para que el fallo sea

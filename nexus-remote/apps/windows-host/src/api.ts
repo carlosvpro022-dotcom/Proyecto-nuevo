@@ -58,12 +58,45 @@ export interface PairingView {
   remainingAttempts: number;
 }
 
+/**
+ * Hasta donde esta verificada una funcion. Corresponde a los niveles del
+ * ADR-0007: `working` se ha ejecutado y probado, `unverified` esta escrito y
+ * compila para Windows pero nunca se ha ejecutado alli, y `pending` todavia no
+ * existe.
+ */
+export type FeatureState = "working" | "unverified" | "pending";
+
 export interface FeatureStatus {
   key: string;
   label: string;
-  ready: boolean;
+  state: FeatureState;
   stage: number;
   detail: string;
+}
+
+/** Resultado de comprobar una capacidad en este equipo concreto. */
+export interface EngineCheck {
+  working: boolean;
+  detail: string;
+}
+
+/** Que puede hacer de verdad este equipo ahora mismo. */
+export interface EngineStatus {
+  capture: EngineCheck;
+  input: EngineCheck;
+}
+
+/** Una pantalla detectada en el host. */
+export interface MonitorInfo {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  origin_x: number;
+  origin_y: number;
+  scale_percent: number;
+  is_primary: boolean;
+  refresh_hz: number | null;
 }
 
 export interface PermissionEntry {
@@ -239,8 +272,12 @@ export const api = {
     return call<void>("set_signaling_url", { url });
   },
 
-  async listMonitors(): Promise<unknown> {
-    return call<unknown>("list_monitors");
+  async listMonitors(): Promise<MonitorInfo[]> {
+    return call<MonitorInfo[]>("list_monitors");
+  },
+
+  async engineStatus(): Promise<EngineStatus> {
+    return call<EngineStatus>("engine_status");
   },
 
   async featureMatrix(): Promise<FeatureStatus[]> {
@@ -301,4 +338,23 @@ export function permissionLabel(name: string): string {
     unattended_access: "Acceso desatendido",
   };
   return labels[name] ?? name;
+}
+
+
+/** Texto corto para el estado de verificacion de una funcion. */
+export function featureStateLabel(state: FeatureState): string {
+  switch (state) {
+    case "working":
+      return "Probado";
+    case "unverified":
+      return "Sin probar";
+    case "pending":
+      return "Pendiente";
+  }
+}
+
+/** Formatea una resolucion con su escala, si no es del 100 %. */
+export function formatResolution(monitor: MonitorInfo): string {
+  const base = `${monitor.width} × ${monitor.height}`;
+  return monitor.scale_percent === 100 ? base : `${base} · ${monitor.scale_percent} %`;
 }

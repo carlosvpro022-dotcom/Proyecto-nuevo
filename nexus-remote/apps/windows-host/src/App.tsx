@@ -16,6 +16,8 @@ import {
   type DeviceSummary,
   type FeatureStatus,
   type HostSummary,
+  type EngineStatus,
+  type MonitorInfo,
   type PairingView,
   type PermissionEntry,
   type PermissionProfile,
@@ -26,7 +28,8 @@ import { Card, Notice, Pill, Spinner } from "./components/ui";
 import { Dashboard } from "./views/Dashboard";
 import { Devices } from "./views/Devices";
 import { Pairing } from "./views/Pairing";
-import { Files, History, RemoteDesktop } from "./views/Pendientes";
+import { Files, History } from "./views/Pendientes";
+import { RemoteDesktop } from "./views/RemoteDesktop";
 import { Security } from "./views/Security";
 import { Settings } from "./views/Settings";
 
@@ -83,6 +86,11 @@ interface HostData {
   features: FeatureStatus[];
   catalog: PermissionEntry[];
   pairing: PairingView | null;
+  engine: EngineStatus | null;
+  /** Pantallas detectadas. Vacio si la plataforma no las puede enumerar. */
+  monitors: MonitorInfo[];
+  /** Por que no se pudieron enumerar, si es el caso. */
+  monitorsError: string | null;
 }
 
 export function App() {
@@ -94,15 +102,39 @@ export function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [summary, status, devices, features, catalog, pairing] = await Promise.all([
-        api.hostSummary(),
-        api.systemStatus(),
-        api.listDevices(),
-        api.featureMatrix(),
-        api.permissionCatalog(),
-        api.currentPairing(),
-      ]);
-      setData({ summary, status, devices, features, catalog, pairing });
+      const [summary, status, devices, features, catalog, pairing, engine] =
+        await Promise.all([
+          api.hostSummary(),
+          api.systemStatus(),
+          api.listDevices(),
+          api.featureMatrix(),
+          api.permissionCatalog(),
+          api.currentPairing(),
+          api.engineStatus(),
+        ]);
+
+      // La enumeracion de monitores falla a proposito en las plataformas sin
+      // backend. No es motivo para dejar el panel sin datos: se guarda el
+      // motivo y se muestra en su pantalla.
+      let monitors: MonitorInfo[] = [];
+      let monitorsError: string | null = null;
+      try {
+        monitors = await api.listMonitors();
+      } catch (error) {
+        monitorsError = toHostError(error).message;
+      }
+
+      setData({
+        summary,
+        status,
+        devices,
+        features,
+        catalog,
+        pairing,
+        engine,
+        monitors,
+        monitorsError,
+      });
       setLoadError(null);
     } catch (error) {
       setLoadError(toHostError(error).message);
@@ -160,7 +192,13 @@ export function App() {
       ...(data.devices.length > 0 ? { badge: String(data.devices.length) } : {}),
     },
     { id: "pairing", label: "Conexion remota", icon: "connect", ready: true },
-    { id: "desktop", label: "Escritorio remoto", icon: "desktop", ready: false, badge: "E2" },
+    {
+      id: "desktop",
+      label: "Escritorio remoto",
+      icon: "desktop",
+      ready: false,
+      ...(data.monitors.length > 0 ? { badge: String(data.monitors.length) } : { badge: "E2" }),
+    },
     { id: "files", label: "Archivos", icon: "files", ready: false, badge: "E5" },
     { id: "history", label: "Historial", icon: "history", ready: false, badge: "E3" },
     { id: "security", label: "Seguridad", icon: "security", ready: true },
@@ -232,7 +270,14 @@ export function App() {
         />
       )}
 
-      {view === "desktop" && <RemoteDesktop features={data.features} />}
+      {view === "desktop" && (
+        <RemoteDesktop
+          features={data.features}
+          engine={data.engine}
+          monitors={data.monitors}
+          monitorsError={data.monitorsError}
+        />
+      )}
       {view === "files" && <Files features={data.features} />}
       {view === "history" && <History features={data.features} />}
 

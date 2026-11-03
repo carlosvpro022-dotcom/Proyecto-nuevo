@@ -52,12 +52,15 @@ if intentar "volcado de datos" bash -c \
   intentar "8 pantallas" node scripts/verificar-panel.mjs target/panel-datos.json
 fi
 
+# Es la única comprobación que cubre el backend de Windows: tipos, nombres de
+# API y lints del código que aquí no se puede ejecutar.
 paso "Comprobación en cruce del código de Windows"
 if rustup target list --installed | grep -q x86_64-pc-windows-gnu; then
-  intentar "cargo check (windows-gnu)" \
-    cargo check --target x86_64-pc-windows-gnu \
+  intentar "clippy (windows-gnu)" \
+    cargo clippy --target x86_64-pc-windows-gnu \
       -p nexus-core -p nexus-security -p nexus-capture -p nexus-input \
-      -p nexus-audio -p nexus-transport -p nexus-file-transfer
+      -p nexus-audio -p nexus-transport -p nexus-file-transfer \
+      --all-targets -- -D warnings
 else
   printf '  \033[33m· omitido\033[0m (añada el objetivo con: rustup target add x86_64-pc-windows-gnu)\n'
 fi

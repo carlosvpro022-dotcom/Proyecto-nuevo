@@ -66,7 +66,7 @@ const VIEWS = [
   { id: "dashboard", nav: "Panel", expect: "Este equipo" },
   { id: "devices", nav: "Mis dispositivos", expect: "Dispositivos autorizados" },
   { id: "pairing", nav: "Conexion remota", expect: "Codigo de emparejamiento activo" },
-  { id: "desktop", nav: "Escritorio remoto", expect: "Escritorio remoto" },
+  { id: "desktop", nav: "Escritorio remoto", expect: "Motor de escritorio remoto" },
   { id: "files", nav: "Archivos", expect: "Transferencia de archivos" },
   { id: "history", nav: "Historial", expect: "Historial de sesiones" },
   { id: "security", nav: "Seguridad", expect: "Medidas implementadas" },
@@ -119,6 +119,7 @@ async function main() {
       invoke: (command) => {
         if (command in responses) return Promise.resolve(responses[command]);
         if (command === "cancel_pairing") return Promise.resolve(true);
+        if (command === "list_monitors") return Promise.resolve(responses.list_monitors ?? []);
         return Promise.reject({
           code: "no_implementado",
           message: `comando sin respuesta de prueba: ${command}`,

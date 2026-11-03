@@ -107,6 +107,34 @@ jobs:
           path: nexus-remote/target/capturas-panel/
           if-no-files-found: ignore
 
+  cruce-windows:
+    name: Windows · comprobación en cruce desde Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nexus-remote
+
+      - name: Instalar mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+
+      # Comprueba el código `#[cfg(windows)]` sin necesidad de un runner de
+      # Windows: es rápido y detecta los errores de API al momento.
+      - name: Clippy para Windows
+        working-directory: nexus-remote
+        run: |
+          cargo clippy --target x86_64-pc-windows-gnu \
+            -p nexus-core -p nexus-security -p nexus-capture -p nexus-input \
+            -p nexus-audio -p nexus-transport -p nexus-file-transfer \
+            --all-targets -- -D warnings
+
   windows:
     name: Windows · compilación nativa
     runs-on: windows-2022

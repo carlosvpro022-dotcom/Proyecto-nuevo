@@ -73,6 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "system_status": nexus_windows_host::system::read_status(),
         "list_devices": devices,
         "feature_matrix": feature_matrix(),
+        "engine_status": host.engine_status(),
+        // En Linux la enumeracion falla a proposito; el volcado refleja ese
+        // mismo caso, que es el que vera quien desarrolle aqui.
+        "list_monitors": host.list_monitors().map(|layout| layout.0).unwrap_or_default(),
         "permission_catalog": permission_catalog(),
         "current_pairing": {
             "pairing_id": session.id.to_string(),

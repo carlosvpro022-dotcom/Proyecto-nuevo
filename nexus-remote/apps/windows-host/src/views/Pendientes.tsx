@@ -18,33 +18,6 @@ function stageFor(features: FeatureStatus[], key: string, fallback: number): num
   return features.find((f) => f.key === key)?.stage ?? fallback;
 }
 
-export function RemoteDesktop({ features }: { features: FeatureStatus[] }) {
-  return (
-    <div className="stack">
-      <Pending
-        title="Escritorio remoto"
-        stage={stageFor(features, "capture", 2)}
-        detail={detailFor(
-          features,
-          "capture",
-          "Falta el backend de captura de Windows.",
-        )}
-        dependsOn="Etapa 2 (captura y control de entrada) y etapa 3 (transporte WebRTC)"
-      />
-      <Pending
-        title="Transmision de la pantalla"
-        stage={stageFor(features, "webrtc", 3)}
-        detail={detailFor(
-          features,
-          "webrtc",
-          "Falta la negociacion ICE y los canales de medios.",
-        )}
-        dependsOn="Servidor de senalizacion en marcha y servidor TURN desplegado"
-      />
-    </div>
-  );
-}
-
 export function Files({ features }: { features: FeatureStatus[] }) {
   return (
     <div className="stack">

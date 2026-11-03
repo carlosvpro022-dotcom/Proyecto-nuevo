@@ -8,8 +8,10 @@ exclusivo a los dispositivos previamente autorizados.
 
 ## Estado real del proyecto
 
-**Etapa 1 de 6 terminada.** Lo que sigue es exacto: lo que dice que funciona,
-funciona y está probado; lo que no, está señalado.
+**Etapa 1 terminada. Etapa 2 escrita y compilada, pendiente de probar en
+Windows.** Lo que sigue es exacto, y distingue tres cosas: lo que se ha
+ejecutado y probado, lo que está escrito y compila para Windows pero **nadie
+ha ejecutado allí**, y lo que todavía no existe.
 
 ### Funciona y está probado
 
@@ -26,41 +28,62 @@ funciona y está probado; lo que no, está señalado.
 | **Servidor de señalización** | Arranca, valida su configuración, responde `/health` y `/v1/info`, y para de forma ordenada. |
 | **Panel del host** | Aplicación Tauri con 8 pantallas. Muestra datos reales del equipo. |
 
-### Todavía no funciona
+### Escrito y compila para Windows, pero sin ejecutar allí
+
+Esto es la etapa 2. El compilador verificó tipos, nombres de API y firmas
+mediante compilación en cruce a `x86_64-pc-windows-gnu`, con clippy pedantic y
+los avisos como errores. **Nadie lo ha ejecutado en un PC con Windows**, así
+que el comportamiento está sin comprobar.
+
+| Pieza | Cómo está implementada |
+| --- | --- |
+| **Detección de monitores** | `EnumDisplayMonitors`, `GetMonitorInfoW`, `GetDpiForMonitor` y `EnumDisplaySettingsW`. Devuelve resolución, posición, escala, refresco y cuál es la principal. |
+| **Captura de pantalla** | Windows Graphics Capture sobre Direct3D 11: cola de fotogramas sin hilo propio, copia a textura de preparación y lectura BGRA. Rehace la cola al cambiar la resolución y recupera el fotograma a la cola pase lo que pase. |
+| **Control de ratón y teclado** | `SendInput` con coordenadas absolutas sobre el escritorio virtual, tabla de ~110 teclas con su marca de extendida, texto por `KEYEVENTF_UNICODE` (pares subrogados incluidos) y liberación de todo al cerrar. |
+
+Lo que **sí** está probado de esa etapa es la parte portable, que es donde
+están los errores difíciles: la tabla de teclas, la aritmética de coordenadas
+(verificada píxel a píxel sobre siete configuraciones de pantalla) y la
+conversión de los datos crudos del sistema.
+
+### Todavía no existe
 
 | Pieza | Etapa | Qué falta |
 | --- | --- | --- |
-| Captura de pantalla | 2 | El backend de Windows Graphics Capture. El contrato y el control de ritmo están listos. |
-| Control de ratón y teclado | 2 | La inyección con `SendInput`. La validación y la traducción de coordenadas están listas y probadas. |
 | Canal de señalización | 3 | El WebSocket `/v1/signaling`. La maquinaria de autenticación que necesita ya existe. |
 | Sesión WebRTC | 3 | Negociación ICE y canales de medios y datos. |
 | Cliente de iPhone y iPad | 4 | El proyecto entero. **Hace falta un Mac con Xcode.** |
 | Audio, archivos, portapapeles, administración | 5 | Las llamadas al sistema. Protocolo, permisos y contabilidad están listos. |
 | Cifrado de la clave del host con DPAPI | 6 | Hoy la clave privada está en un archivo sin cifrar. |
 
-El panel refleja esto mismo: cada pantalla sin funcionalidad dice en qué etapa
-llega y qué le falta. **No hay datos de ejemplo en ninguna parte**
+El panel refleja esta misma distinción con tres estados —*Probado*, *Sin
+probar*, *Pendiente*—, y una prueba impide marcar como probado código de
+Windows que nadie ha ejecutado en Windows. Además del estado del proyecto, el
+panel comprueba **este equipo concreto**: intenta enumerar las pantallas y
+crear el inyector, y enseña lo que ocurrió.
+
+**No hay datos de ejemplo en ninguna parte**
 ([ADR-0008](docs/architecture/ADR-0008-sin-datos-simulados.md)).
 
 ### Verificación
 
 ```
-417 pruebas automatizadas, todas en verde
+475 pruebas automatizadas, todas en verde
   · nexus-security        102    criptografía, emparejamiento, antirreenvío
   · nexus-core             98    protocolo, permisos, estados
-  · nexus-windows-host     59    almacén, identidad, servicio del host, comandos
+  · nexus-windows-host     62    almacén, identidad, servicio del host, comandos
+  · nexus-input            44    tabla de teclas, coordenadas absolutas
+  · nexus-capture          41    fotogramas, ritmo, enumeración de monitores
   · nexus-file-transfer    37    restricción de acceso, transferencias
   · nexus-transport        28    códec, ICE, enlace
   · nexus-signaling        27    configuración, TURN, rutas
-  · nexus-capture          22    fotogramas, ritmo
-  · nexus-input            17    resolución de coordenadas
+  · integración            22    recorridos completos entre crates
   · nexus-audio            14    formato, volumen
-  · integración            13    recorridos completos entre crates
 
 cargo fmt            sin diferencias
-clippy::pedantic     sin un solo aviso en todo el workspace, con -D warnings
+clippy::pedantic     sin un solo aviso, con -D warnings, en Linux y en Windows
 panel                8 pantallas verificadas en Chromium con datos reales del backend
-cruce a Windows      cargo check --target x86_64-pc-windows-gnu correcto
+cruce a Windows      clippy --target x86_64-pc-windows-gnu limpio en los 7 crates
 servidor             arranca, responde /health y /v1/info, y para con SIGTERM
 ```
 
@@ -198,14 +221,23 @@ Lo que **no** protege todavía está en la pantalla de Seguridad del panel y en
 
 ## Lo siguiente
 
-**Etapa 2 — Motor de Windows.** Implementar `nexus-capture` y `nexus-input`
-sobre Windows Graphics Capture y `SendInput`. Es la primera etapa que necesita
-un PC con Windows para probarse de verdad: el compilado en cruce comprueba los
-tipos, no el comportamiento.
+**Probar la etapa 2 en Windows.** El motor está escrito; falta ejecutarlo. En
+un PC con Windows 10 u 11:
 
-Las etapas siguientes, en orden, son: comunicación (3), cliente Apple (4),
-funciones avanzadas (5) y producción (6). Ninguna avanza hasta que la anterior
-funcione.
+```bash
+cd nexus-remote/apps/windows-host
+npm install && npm run tauri dev
+```
+
+Y comprobar, en la pantalla *Escritorio remoto*, que aparecen las pantallas
+reales con su resolución, posición y escala, y que el motor se declara
+disponible. Lo que más probable es que necesite ajuste: la lectura de los
+fotogramas (paso de fila y formato) y la marca de tecla extendida en teclados
+no españoles.
+
+Después, **etapa 3 — Comunicación**: el WebSocket `/v1/signaling` y WebRTC.
+Luego cliente Apple (4), funciones avanzadas (5) y producción (6). Ninguna
+avanza hasta que la anterior funcione.
 
 ### Lo que hace falta y no se puede resolver desde aquí
 

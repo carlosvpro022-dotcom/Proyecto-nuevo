@@ -18,7 +18,8 @@ export function Dashboard({
   status: SystemStatus;
   features: FeatureStatus[];
 }) {
-  const ready = features.filter((f) => f.ready).length;
+  const probadas = features.filter((f) => f.state === "working").length;
+  const sinProbar = features.filter((f) => f.state === "unverified").length;
   const memoryUsed = status.memory_total_mib - status.memory_available_mib;
   const memoryPercent =
     status.memory_total_mib > 0
@@ -111,9 +112,23 @@ export function Dashboard({
         </table>
       </Card>
 
+      {sinProbar > 0 && (
+        <Notice tone="warn">
+          <strong>{sinProbar} funciones estan escritas pero sin comprobar.</strong> El
+          codigo de captura y control de Windows compila para su plataforma, pero
+          todavia no se ha ejecutado en un PC con Windows. Hasta entonces no se debe
+          dar por bueno.
+        </Notice>
+      )}
+
       <Card
         title="Estado de las funciones"
-        hint={`${ready} de ${features.length} funciones operativas. El resto indica en que etapa llega.`}
+        hint={
+          `${probadas} de ${features.length} probadas ejecutandolas` +
+          (sinProbar > 0
+            ? `, ${sinProbar} escritas para Windows pero sin ejecutar alli todavia.`
+            : ".")
+        }
       >
         <div className="feature-list">
           {features.map((feature) => (

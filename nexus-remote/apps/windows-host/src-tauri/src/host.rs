@@ -44,6 +44,48 @@ struct OpenPairing {
     code: PairingCode,
 }
 
+/// Resultado de comprobar una capacidad del motor.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EngineCheck {
+    /// Si la capacidad funciona en este equipo.
+    pub working: bool,
+    /// Explicacion legible: que se detecto, o por que no funciona.
+    pub detail: String,
+}
+
+impl EngineCheck {
+    fn working(detail: impl Into<String>) -> Self {
+        Self {
+            working: true,
+            detail: detail.into(),
+        }
+    }
+
+    fn failed(detail: impl Into<String>) -> Self {
+        Self {
+            working: false,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Estado del motor de escritorio remoto en este equipo.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EngineStatus {
+    /// Captura de pantalla.
+    pub capture: EngineCheck,
+    /// Inyeccion de raton y teclado.
+    pub input: EngineCheck,
+}
+
+impl EngineStatus {
+    /// Indica si el equipo puede sostener una sesion remota completa.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        self.capture.working && self.input.working
+    }
+}
+
 /// Servicio del host.
 pub struct HostService {
     identity: DeviceIdentity,
@@ -346,14 +388,52 @@ impl HostService {
 
     /// Enumera los monitores del host.
     ///
+    /// En Windows consulta el sistema de verdad. En cualquier otra plataforma
+    /// devuelve [`CaptureError::UnsupportedPlatform`](nexus_capture::CaptureError::UnsupportedPlatform),
+    /// que la interfaz muestra como tal en lugar de una lista vacia.
+    ///
     /// # Errors
     ///
-    /// [`HostError::Capture`] con
-    /// [`CaptureError::UnsupportedPlatform`](nexus_capture::CaptureError::UnsupportedPlatform)
-    /// mientras no exista el backend de Windows (etapa 2).
+    /// [`HostError::Capture`] si la plataforma no tiene backend o si la
+    /// enumeracion falla.
     pub fn list_monitors(&self) -> HostResult<nexus_core::MonitorLayout> {
-        use nexus_capture::ScreenCapturer;
-        Ok(nexus_capture::UnsupportedCapturer.enumerate_monitors()?)
+        Ok(nexus_capture::enumerate_monitors()?)
+    }
+
+    /// Comprueba si este host puede capturar la pantalla e inyectar entrada.
+    ///
+    /// Devuelve lo que ocurre **de verdad al intentarlo**, no una suposicion a
+    /// partir del sistema operativo: en Windows, un equipo demasiado antiguo o
+    /// sin Direct3D fallaria aqui, y conviene que la persona lo vea en el
+    /// panel antes de intentar una sesion.
+    #[must_use]
+    pub fn engine_status(&self) -> EngineStatus {
+        let capture = match nexus_capture::enumerate_monitors() {
+            Ok(layout) if layout.is_empty() => {
+                EngineCheck::failed("el sistema no reporto ninguna pantalla")
+            }
+            Ok(layout) => {
+                EngineCheck::working(format!("{} pantalla(s) detectada(s)", layout.len()))
+            }
+            Err(error) => EngineCheck::failed(error.to_string()),
+        };
+
+        let input = match nexus_input::default_injector() {
+            Ok(injector) => {
+                let name = injector.name();
+                if name == "unsupported" {
+                    EngineCheck::failed(format!(
+                        "sin backend de inyeccion en {}",
+                        std::env::consts::OS
+                    ))
+                } else {
+                    EngineCheck::working(format!("backend {name} listo"))
+                }
+            }
+            Err(error) => EngineCheck::failed(error.to_string()),
+        };
+
+        EngineStatus { capture, input }
     }
 }
 
@@ -754,7 +834,8 @@ mod tests {
     }
 
     #[test]
-    fn monitor_enumeration_reports_the_missing_backend() {
+    #[cfg(not(windows))]
+    fn fuera_de_windows_la_enumeracion_dice_que_no_hay_backend() {
         let host = service();
         let err = host.list_monitors().unwrap_err();
         assert!(
@@ -762,8 +843,47 @@ mod tests {
                 err,
                 HostError::Capture(nexus_capture::CaptureError::UnsupportedPlatform { .. })
             ),
-            "mientras no haya backend debe decirlo claramente: {err:?}"
+            "debe decirlo claramente en lugar de devolver una lista vacia: {err:?}"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn en_windows_la_enumeracion_encuentra_al_menos_una_pantalla() {
+        let host = service();
+        let layout = host.list_monitors().expect("Windows deberia enumerar");
+        assert!(
+            !layout.is_empty(),
+            "un equipo con escritorio tiene al menos una pantalla"
+        );
+        layout
+            .validate()
+            .expect("todas las pantallas deben ser validas");
+        assert!(
+            layout.primary().is_some(),
+            "deberia haber una pantalla principal"
+        );
+    }
+
+    #[test]
+    fn el_estado_del_motor_refleja_la_plataforma_real() {
+        let host = service();
+        let status = host.engine_status();
+
+        // Cada comprobacion explica lo que encontro, funcione o no.
+        assert!(!status.capture.detail.is_empty());
+        assert!(!status.input.detail.is_empty());
+
+        if cfg!(windows) {
+            assert!(
+                status.input.working,
+                "en Windows deberia haber inyeccion de entrada"
+            );
+        } else {
+            assert!(!status.capture.working, "fuera de Windows no hay captura");
+            assert!(!status.input.working, "fuera de Windows no hay inyeccion");
+            assert!(!status.is_ready());
+        }
     }
 
     #[test]

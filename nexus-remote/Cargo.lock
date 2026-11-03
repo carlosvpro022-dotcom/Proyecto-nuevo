@@ -2171,6 +2171,7 @@ dependencies = [
  "nexus-core",
  "serde",
  "thiserror 2.0.21",
+ "windows",
 ]
 
 [[package]]
@@ -2199,12 +2200,14 @@ version = "0.1.0"
 dependencies = [
  "nexus-core",
  "thiserror 2.0.21",
+ "windows",
 ]
 
 [[package]]
 name = "nexus-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "nexus-capture",
  "nexus-core",
  "nexus-file-transfer",
  "nexus-input",

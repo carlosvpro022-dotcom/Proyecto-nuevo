@@ -31,11 +31,19 @@ con `mingw-w64`, que ya está instalado:
 
 ```bash
 rustup target add x86_64-pc-windows-gnu
-cargo check --target x86_64-pc-windows-gnu -p nexus-capture -p nexus-input
+cargo clippy --target x86_64-pc-windows-gnu -p nexus-capture -p nexus-input \
+  --all-targets -- -D warnings
 ```
 
-Comprueba tipos, nombres de API y firmas del crate `windows`. No comprueba que
-el comportamiento sea el correcto.
+Comprueba tipos, nombres de API, firmas del crate `windows` y los lints, con
+los avisos tratados como errores. **No comprueba que el comportamiento sea el
+correcto.**
+
+Qué ha detectado de verdad este nivel, en la etapa 2: que `IsSupported` está
+en `GraphicsCaptureSession` y no en `GraphicsCaptureItem`, que
+`MONITORINFOF_PRIMARY` vive en `WindowsAndMessaging` y no en `Gdi`, y que
+`CPUAccessFlags` es `u32` mientras la constante es `i32`. Son exactamente los
+errores que un compilador encuentra y una lectura atenta no.
 
 ### Nivel 3 · Verificado en un motor equivalente
 
@@ -50,13 +58,31 @@ Código que no ha pasado por ninguno de los anteriores. Se marca explícitamente
 en la documentación del módulo y en la matriz de funciones del panel. **No se
 describe como terminado.**
 
+## Cómo se refleja en el producto
+
+Un booleano «funciona / no funciona» no basta para describir esto, así que
+`commands::FeatureState` tiene tres valores que corresponden a los niveles:
+
+| Estado | Significa | Nivel |
+| --- | --- | --- |
+| `working` | Ejecutado y probado | 1 |
+| `unverified` | Escrito y compilado para Windows, **nunca ejecutado allí** | 2 |
+| `pending` | Todavía no implementado | — |
+
+El panel los muestra con colores distintos y el aviso correspondiente. Dos
+pruebas lo sostienen: una comprueba que el estado concuerda con la etapa, y
+otra, `nada_de_la_etapa_2_se_declara_probado`, impide marcar como probado
+código de Windows que nadie ha ejecutado en Windows.
+
 ## Consecuencias
 
-- La matriz de `commands::feature_matrix` es parte del producto, no
-  documentación aparte: el panel la usa para no mostrar botones que no hacen
-  nada, y una prueba comprueba que nada marcado como listo pertenezca a una
-  etapa futura.
+- La matriz de funciones es parte del producto, no documentación aparte: el
+  panel la usa para no mostrar como terminado lo que no lo está.
+- Además de la matriz, que describe el estado del **proyecto**, el comando
+  `engine_status` comprueba el **equipo concreto**: intenta enumerar pantallas
+  y crear el inyector, y devuelve lo que ocurrió de verdad.
 - Los backends sin implementación devuelven `UnsupportedPlatform`, no un valor
   vacío. Un error explícito es distinguible de un fallo; una lista vacía no.
-- Antes de dar por buena la etapa 2 hará falta **un PC con Windows real**. El
-  compilado en cruce no sustituye a probar la captura de pantalla.
+- **Antes de dar por buena la etapa 2 hace falta un PC con Windows real.** El
+  compilado en cruce no sustituye a comprobar que los fotogramas llegan, que
+  el cursor cae donde debe y que las combinaciones de teclas funcionan.

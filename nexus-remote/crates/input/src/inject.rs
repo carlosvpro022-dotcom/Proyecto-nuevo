@@ -2,13 +2,12 @@
 //!
 //! # Estado de implementacion
 //!
-//! **No hay backend de Windows todavia.** Corresponde a la etapa 2 y usara
-//! `SendInput` de la API de Windows mas la tabla de traduccion de
-//! [`KeyCode`](nexus_core::protocol::input::KeyCode) a codigos virtuales.
-//!
-//! Lo que si existe y esta probado es el contrato y un backend de registro que
-//! permite verificar el flujo completo (protocolo, permisos, resolucion de
-//! coordenadas) sin tocar ningun sistema real.
+//! El backend de Windows vive en [`crate::platform::windows`] y usa
+//! `SendInput`. Aqui viven el contrato y dos implementaciones auxiliares:
+//! [`RecordingInjector`], que anota lo que recibe y permite verificar el flujo
+//! completo (protocolo, permisos, resolucion de coordenadas) sin tocar ningun
+//! sistema real, y [`UnsupportedInjector`], que falla de forma explicita en
+//! las plataformas sin inyeccion.
 
 use crate::error::{InputError, InputResult};
 use crate::resolve::ResolvedInput;

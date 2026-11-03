@@ -84,6 +84,7 @@ pub fn run() {
             commands::set_device_profile,
             commands::set_signaling_url,
             commands::list_monitors,
+            commands::engine_status,
             commands::feature_matrix,
             commands::permission_catalog,
         ])
