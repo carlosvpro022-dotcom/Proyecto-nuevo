@@ -1,9 +1,9 @@
 /**
  * Escritorio remoto: motor de captura y control, y las pantallas detectadas.
  *
- * Lo que ya existe (etapa 2) se muestra con datos reales. Lo que falta para
- * poder ver de verdad el escritorio desde el iPad (etapa 3) se dice sin
- * rodeos, en lugar de enseñar un reproductor vacio.
+ * Lo que ya existe se muestra con datos reales. Lo que falta para poder ver de
+ * verdad el escritorio desde el iPad se dice sin rodeos, en lugar de enseñar
+ * un reproductor vacio.
  */
 
 import {
@@ -27,7 +27,8 @@ export function RemoteDesktop({
 }) {
   const capture = features.find((f) => f.key === "capture");
   const input = features.find((f) => f.key === "input");
-  const webrtc = features.find((f) => f.key === "webrtc");
+  const video = features.find((f) => f.key === "video");
+  const internet = features.find((f) => f.key === "internet");
 
   return (
     <div className="stack">
@@ -99,14 +100,21 @@ export function RemoteDesktop({
         )}
       </Card>
 
+      {internet && (
+        <Notice tone="warn">
+          <strong>La conexion entre redes distintas esta sin comprobar.</strong>{" "}
+          {internet.detail}
+        </Notice>
+      )}
+
       <Pending
-        title="Ver y controlar el escritorio desde el iPad"
-        stage={webrtc?.stage ?? 3}
+        title="Ver el escritorio desde el iPad"
+        stage={video?.stage ?? 5}
         detail={
-          webrtc?.detail ??
-          "Falta la negociacion ICE y los canales de medios y datos."
+          video?.detail ??
+          "Falta codificar los fotogramas y enviarlos por una pista de medios."
         }
-        dependsOn="Servidor de senalizacion en marcha y servidor TURN desplegado"
+        dependsOn="La aplicacion de iPhone y iPad, que es la etapa 4"
       />
     </div>
   );

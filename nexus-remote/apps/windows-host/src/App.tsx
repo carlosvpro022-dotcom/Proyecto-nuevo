@@ -203,7 +203,7 @@ export function App() {
       ...(data.monitors.length > 0 ? { badge: String(data.monitors.length) } : { badge: "E2" }),
     },
     { id: "files", label: "Archivos", icon: "files", ready: false, badge: "E5" },
-    { id: "history", label: "Historial", icon: "history", ready: false, badge: "E3" },
+    { id: "history", label: "Historial", icon: "history", ready: false, badge: "E5" },
     { id: "security", label: "Seguridad", icon: "security", ready: true },
     { id: "settings", label: "Configuracion", icon: "settings", ready: true },
   ];

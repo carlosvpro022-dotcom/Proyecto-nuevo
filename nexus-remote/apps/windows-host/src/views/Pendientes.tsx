@@ -29,7 +29,7 @@ export function Files({ features }: { features: FeatureStatus[] }) {
           "files",
           "Falta mover bytes por el canal de datos.",
         )}
-        dependsOn="Etapa 3 (canal de datos de WebRTC)"
+        dependsOn="El canal de datos ya existe; falta mover los bytes"
       />
     </div>
   );
@@ -40,13 +40,14 @@ export function History({ features }: { features: FeatureStatus[] }) {
     <div className="stack">
       <Pending
         title="Historial de sesiones"
-        stage={stageFor(features, "signaling", 3)}
+        stage={stageFor(features, "video", 5)}
         detail={
           "La tabla de sesiones y su registro ya existen en la base de datos local, " +
-          "con dispositivo, duracion y motivo de cierre. Esta vacia porque todavia no " +
-          "se puede abrir ninguna sesion remota."
+          "con dispositivo, duracion y motivo de cierre. Esta vacia porque el host " +
+          "todavia no mantiene sesiones abiertas: la conexion y la senalizacion ya " +
+          "funcionan, pero falta el bucle que atiende una sesion mientras dura."
         }
-        dependsOn="Etapa 3 (primera sesion remota establecida)"
+        dependsOn="El bucle de sesion del host, que llega con la transmision de pantalla"
       />
     </div>
   );

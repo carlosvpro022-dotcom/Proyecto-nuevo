@@ -50,7 +50,7 @@ export function Dashboard({
         <Stat
           label="Sesiones activas"
           value={0}
-          note="Requiere la etapa 3 (WebRTC)"
+          note="El host aun no mantiene sesiones abiertas"
         />
         <Stat
           label="Memoria en uso"

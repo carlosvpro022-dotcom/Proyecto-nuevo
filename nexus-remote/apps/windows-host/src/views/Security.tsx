@@ -63,6 +63,21 @@ const IMPLEMENTED = [
     module: "nexus-file-transfer::access",
   },
   {
+    name: "Autenticacion mutua atada al canal cifrado",
+    detail:
+      "Cada extremo firma las dos huellas DTLS de la sesion y comprueba la del otro " +
+      "contra la que negocio de verdad. Si el servidor sustituye una para interceptar, " +
+      "la sesion se aborta.",
+    module: "nexus-security::binding",
+  },
+  {
+    name: "Identidades del servidor separadas de los permisos",
+    detail:
+      "El servidor liga cada identificador a una clave publica y nada mas. Quien decide " +
+      "que puede hacer un dispositivo es el host, en su propio registro.",
+    module: "nexus-signaling::enrollment",
+  },
+  {
     name: "Credenciales TURN temporales",
     detail: "Derivadas por HMAC-SHA1 con caducidad. Filtrar una no da acceso permanente al relay.",
     module: "nexus-signaling::turn",
@@ -82,13 +97,17 @@ const PENDING = [
     stage: 6,
   },
   {
-    name: "Cifrado de medios extremo a extremo en marcha",
-    detail: "DTLS-SRTP esta elegido y documentado, pero no hay sesion WebRTC todavia.",
+    name: "TLS en la senalizacion, comprobado en un despliegue",
+    detail:
+      "El servidor delega el TLS en un proxy inverso. La configuracion esta escrita, " +
+      "pero nadie la ha desplegado todavia: hace falta un dominio y un certificado.",
     stage: 3,
   },
   {
-    name: "TLS en la senalizacion",
-    detail: "El servidor lo delega en un proxy inverso; falta desplegarlo y probarlo de extremo a extremo.",
+    name: "Emparejar desde fuera de la red local",
+    detail:
+      "El servidor lo rechaza a proposito: el codigo tiene unos 40 bits y viajaria en " +
+      "claro por el. Mientras tanto, se empareja en la red local.",
     stage: 3,
   },
   {
@@ -141,7 +160,7 @@ export function Security({
         <div className="stat">
           <span className="stat__label">Intentos fallidos</span>
           <span className="stat__value">—</span>
-          <span className="stat__note">Se contara con la etapa 3</span>
+          <span className="stat__note">El servidor los cuenta; falta traerlos aqui</span>
         </div>
       </div>
 
