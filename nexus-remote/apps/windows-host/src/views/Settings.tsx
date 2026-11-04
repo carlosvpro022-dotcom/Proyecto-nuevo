@@ -2,14 +2,16 @@
 
 import { useState } from "react";
 
-import type { HostSummary, SignalingProbe } from "../api";
+import type { HostSummary, NetworkExposure, SignalingProbe } from "../api";
 import { Card, Notice } from "../components/ui";
 
 export function Settings({
   summary,
   onSaveSignalingUrl,
   onCheckSignaling,
+  onSaveNetwork,
   probe,
+  exposure,
   checking,
   busy,
   error,
@@ -17,13 +19,17 @@ export function Settings({
   summary: HostSummary;
   onSaveSignalingUrl: (url: string) => void;
   onCheckSignaling: (enrollmentToken: string) => void;
+  onSaveNetwork: (udpPort: number, publicEndpoint: string | null) => void;
   probe: SignalingProbe | null;
+  exposure: NetworkExposure | null;
   checking: boolean;
   busy: boolean;
   error: string | null;
 }) {
   const [url, setUrl] = useState(summary.signalingUrl ?? "");
   const [token, setToken] = useState("");
+  const [port, setPort] = useState(String(exposure?.udp_port ?? 0));
+  const [endpoint, setEndpoint] = useState(exposure?.public_endpoint ?? "");
   const dirty = url.trim() !== (summary.signalingUrl ?? "");
   const configured = (summary.signalingUrl ?? "").length > 0;
 
@@ -77,6 +83,70 @@ export function Settings({
               Descartar cambios
             </button>
           )}
+        </div>
+      </Card>
+
+      <Card
+        title="Si el servidor esta en este mismo PC"
+        hint="Solo hace falta si aloja el servidor aqui y abre un puerto en su router. Dejelo en blanco si usa un servidor aparte."
+      >
+        <div className="grid grid--two">
+          <div className="field">
+            <label className="field__label" htmlFor="udp-port">
+              Puerto UDP de la sesion
+            </label>
+            <input
+              id="udp-port"
+              className="input"
+              type="number"
+              min={0}
+              max={65535}
+              value={port}
+              onChange={(event) => setPort(event.target.value)}
+            />
+            <span className="field__hint">
+              El mismo que abrio en el router. Un puerto al azar (0) no se puede
+              reenviar porque no se sabe cual sera.
+            </span>
+          </div>
+
+          <div className="field">
+            <label className="field__label" htmlFor="public-endpoint">
+              Direccion publica de su casa
+            </label>
+            <input
+              id="public-endpoint"
+              className="input"
+              type="text"
+              value={endpoint}
+              placeholder="micasa.duckdns.org"
+              spellCheck={false}
+              onChange={(event) => setEndpoint(event.target.value)}
+            />
+            <span className="field__hint">
+              Un nombre de DNS dinamico, mejor que una IP: la que da su
+              operador cambia y el nombre no. Se resuelve en cada sesion.
+            </span>
+          </div>
+        </div>
+
+        <div className="row" style={{ marginTop: "var(--space-4)" }}>
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() =>
+              onSaveNetwork(
+                Number.parseInt(port, 10) || 0,
+                endpoint.trim().length > 0 ? endpoint.trim() : null,
+              )
+            }
+          >
+            Guardar
+          </button>
+          <span className="field__hint">
+            La guia completa esta en docs/deployment/en-el-mismo-pc.md
+          </span>
         </div>
       </Card>
 

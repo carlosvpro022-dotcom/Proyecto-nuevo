@@ -38,7 +38,8 @@ use nexus_security::registry::DeviceRecord;
 use nexus_security::{AuthRole, BindingProof, DeviceIdentity, DevicePublicKey, SessionBinding};
 use nexus_transport::client::{ConnectRequest, SignalingClient};
 use nexus_transport::peer::{
-    CONTROL_CHANNEL, INPUT_CHANNEL, LinkPhase, PeerEvent, PeerRole, PeerSession,
+    CONTROL_CHANNEL, INPUT_CHANNEL, LinkPhase, NetworkOptions, PeerEvent, PeerRole, PeerSession,
+    resolve_public_ip,
 };
 use nexus_transport::{LinkEvent, LinkState, SignalingLink, TransportError};
 use tokio::sync::mpsc;
@@ -57,6 +58,16 @@ pub struct RuntimeConfig {
     pub enrollment_token: Option<String>,
     /// Monitores del equipo, para resolver las coordenadas.
     pub monitors: MonitorLayout,
+    /// Puerto UDP fijo para la conexion cifrada, o `0` para uno automatico.
+    ///
+    /// Hace falta fijarlo cuando este equipo se alcanza desde fuera por un
+    /// puerto abierto en el router: un puerto al azar no se puede reenviar.
+    pub udp_port: u16,
+    /// Direccion publica que anunciar: una IP o el nombre de un DNS dinamico.
+    ///
+    /// Se resuelve **al abrir cada sesion**, de modo que un cambio de IP
+    /// domestica se recoge solo en la siguiente conexion.
+    pub public_endpoint: Option<String>,
 }
 
 /// Acceso al registro local de dispositivos emparejados.
@@ -295,6 +306,21 @@ impl HostRuntime {
         }
     }
 
+    /// Como se expone este equipo, con la direccion publica ya resuelta.
+    ///
+    /// Se resuelve en cada sesion y no una vez al arrancar: una IP domestica
+    /// cambia, y lo que no cambia es el nombre del DNS dinamico.
+    async fn network(&self) -> Result<NetworkOptions, TransportError> {
+        let public_ip = match &self.config.public_endpoint {
+            Some(endpoint) => Some(resolve_public_ip(endpoint).await?),
+            None => None,
+        };
+        Ok(NetworkOptions {
+            udp_port: self.config.udp_port,
+            public_ip,
+        })
+    }
+
     /// Decide la peticion y, si procede, sirve la sesion.
     async fn on_session_requested(
         &mut self,
@@ -385,7 +411,8 @@ impl HostRuntime {
         permissions: PermissionSet,
         peer_key: &DevicePublicKey,
     ) -> Result<(), TransportError> {
-        let mut peer = PeerSession::open(ice, PeerRole::Offerer).await?;
+        let mut peer =
+            PeerSession::open_with(ice, PeerRole::Offerer, &self.network().await?).await?;
         let offer = peer.create_offer().await?;
         sig.send(ClientToServer::Offer {
             session_id,

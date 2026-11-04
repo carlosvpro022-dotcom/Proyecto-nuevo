@@ -34,4 +34,4 @@ pub use error::{TransportError, TransportResult};
 pub use ice::{IceConfiguration, TransportPolicy};
 pub use link::{LinkEvent, LinkState, SignalingLink};
 #[cfg(feature = "peer")]
-pub use peer::{LinkPhase, PeerEvent, PeerRole, PeerSession};
+pub use peer::{LinkPhase, NetworkOptions, PeerEvent, PeerRole, PeerSession, resolve_public_ip};

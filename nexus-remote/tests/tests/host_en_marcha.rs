@@ -82,6 +82,8 @@ impl HostEnMarcha {
                 device: host.info.clone(),
                 enrollment_token: Some(TOKEN.to_owned()),
                 monitors: layout(),
+                udp_port: 0,
+                public_endpoint: None,
             },
             host.duplicate_identity(),
             Arc::new(registro),

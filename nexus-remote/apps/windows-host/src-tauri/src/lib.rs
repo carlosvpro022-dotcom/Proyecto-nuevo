@@ -93,6 +93,8 @@ pub fn run() {
             commands::stop_host,
             commands::runtime_status,
             commands::session_history,
+            commands::set_network_exposure,
+            commands::network_exposure,
             commands::feature_matrix,
             commands::permission_catalog,
         ])

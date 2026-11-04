@@ -605,12 +605,15 @@ pub fn start_host(
             tracing::warn!(%error, "sin monitores detectados; se usara una pantalla ficticia");
             nexus_core::MonitorLayout(Vec::new())
         });
+        let (udp_port, public_endpoint) = host.network_exposure()?;
         Ok((
             crate::runtime::RuntimeConfig {
                 url,
                 device: host.describe_self(),
                 enrollment_token,
                 monitors,
+                udp_port,
+                public_endpoint,
             },
             host.duplicate_identity()?,
         ))
@@ -677,6 +680,51 @@ pub fn runtime_status(
         crate::supervisor::RuntimeStatus::stopped,
         crate::supervisor::RuntimeHandle::status,
     ))
+}
+
+/// Guarda como se expone este equipo a la red.
+///
+/// Solo hace falta cuando el servidor esta en este mismo PC y se alcanza desde
+/// fuera abriendo un puerto en el router.
+///
+/// # Errors
+///
+/// - [`HostError::InvalidInput`] si el puerto esta reservado al sistema.
+/// - [`HostError::Database`] si la escritura falla.
+#[tauri::command]
+pub fn set_network_exposure(
+    state: tauri::State<'_, AppState>,
+    udp_port: u16,
+    public_endpoint: Option<String>,
+) -> CmdResult<()> {
+    with_host(&state, |host| {
+        host.set_network_exposure(udp_port, public_endpoint.as_deref())
+    })
+}
+
+/// Devuelve como se expone este equipo a la red.
+#[derive(Debug, Serialize)]
+pub struct NetworkExposure {
+    /// Puerto UDP fijo, o 0 si lo elige el sistema.
+    pub udp_port: u16,
+    /// Direccion publica declarada, si la hay.
+    pub public_endpoint: Option<String>,
+}
+
+/// Lee como se expone este equipo a la red.
+///
+/// # Errors
+///
+/// [`HostError::Database`] si la lectura falla.
+#[tauri::command]
+pub fn network_exposure(state: tauri::State<'_, AppState>) -> CmdResult<NetworkExposure> {
+    with_host(&state, |host| {
+        let (udp_port, public_endpoint) = host.network_exposure()?;
+        Ok(NetworkExposure {
+            udp_port,
+            public_endpoint,
+        })
+    })
 }
 
 /// Devuelve las sesiones mas recientes del historial.

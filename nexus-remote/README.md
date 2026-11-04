@@ -263,11 +263,17 @@ fotogramas (paso de fila y formato) y la marca de tecla extendida en teclados
 no españoles.
 
 **Desplegar el servidor.** La etapa 3 está terminada y probada, pero contra
-sockets locales. Para cerrarla hace falta una máquina con IP pública y un
-dominio; la guía completa está en
-[docs/deployment/despliegue.md](docs/deployment/despliegue.md). Después, en el
-panel del host, *Configuración* → **Probar conexión**: esa comprobación se
-conecta de verdad y dice qué encontró, incluido si el relay TURN está sirviendo.
+sockets locales. Hay dos caminos:
+
+- **En el mismo PC, gratis.** Si su operador le da una IP pública, el servidor
+  cabe en el propio equipo: dos ejecutables, sin Docker ni Linux.
+  [Guía paso a paso](docs/deployment/en-el-mismo-pc.md), con la comprobación
+  previa de si su conexión lo permite.
+- **En una máquina alquilada**, unos 3-6 € al mes, que además permite usar el
+  relay TURN de verdad. [Guía completa](docs/deployment/despliegue.md).
+
+En ambos casos, después: panel del host, *Configuración* → **Probar conexión**.
+Esa comprobación se conecta de verdad y dice qué encontró.
 
 Luego cliente Apple (4), funciones avanzadas (5) y producción (6). Ninguna
 avanza hasta que la anterior funcione.
@@ -301,7 +307,7 @@ a las huellas DTLS y entrega un evento de entrada al manejador del host.
 | Qué | Para qué | Cuándo |
 | --- | --- | --- |
 | Un PC con Windows 10 u 11 | Probar captura y control de entrada | Etapa 2 |
-| Un servidor con IP pública y un dominio | Comprobar la conexión entre redes distintas y el relay TURN | Etapa 3 |
+| Una IP pública en casa, o un servidor alquilado | Conectarse desde fuera de casa. Con IP pública no hace falta pagar nada: [guía para alojarlo en el mismo PC](docs/deployment/en-el-mismo-pc.md) | Etapa 3 |
 | Un Mac con Xcode | Compilar el cliente de iPhone y iPad | Etapa 4 |
 | Cuenta de desarrollador de Apple | Instalar en los dispositivos | Etapa 4 |
 

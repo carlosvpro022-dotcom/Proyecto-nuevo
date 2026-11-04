@@ -109,19 +109,43 @@ impl Config {
 
         let public_url = required(&lookup, "NEXUS_PUBLIC_URL")?;
 
-        let turn_shared_secret = required(&lookup, "NEXUS_TURN_SHARED_SECRET")?;
-        if turn_shared_secret.len() < MIN_SECRET_LEN {
+        // Sin TURN no hay credenciales que derivar, de modo que el secreto
+        // deja de ser obligatorio. Si se declara, se sigue exigiendo que sea
+        // largo: un secreto corto es peor que ninguno, porque aparenta.
+        let turn_shared_secret = lookup("NEXUS_TURN_SHARED_SECRET")
+            .map(|valor| valor.trim().to_owned())
+            .filter(|valor| !valor.is_empty())
+            .unwrap_or_default();
+        if !turn_shared_secret.is_empty() && turn_shared_secret.len() < MIN_SECRET_LEN {
             return Err(ConfigError::SecretTooShort {
                 name: "NEXUS_TURN_SHARED_SECRET",
                 min_len: MIN_SECRET_LEN,
             });
         }
 
-        let turn_urls = split_urls(&required(&lookup, "NEXUS_TURN_URLS")?);
-        if turn_urls.is_empty() {
+        // Quedarse sin relay es una decision, no un descuido: hay que
+        // declararla. Un servidor sin TURN funciona cuando el host se alcanza
+        // directamente (tiene un puerto abierto en su router), y falla desde
+        // una red movil con NAT simetrico. Exigir que se diga en voz alta
+        // evita que alguien lo monte sin saberlo.
+        let allow_no_relay = parse_bool(&lookup, "NEXUS_ALLOW_NO_RELAY")?;
+
+        let turn_raw = lookup("NEXUS_TURN_URLS").unwrap_or_default();
+        let turn_urls = split_urls(&turn_raw);
+        if turn_urls.is_empty() && !allow_no_relay {
             return Err(ConfigError::Invalid {
                 name: "NEXUS_TURN_URLS",
-                value: "lista vacia".to_owned(),
+                value: "sin servidores TURN. Si es a proposito porque el equipo \
+                        se alcanza directamente, declare NEXUS_ALLOW_NO_RELAY=true"
+                    .to_owned(),
+            });
+        }
+
+        // Con TURN declarado, el secreto es obligatorio: sin el no se pueden
+        // derivar credenciales, y Coturn rechazaria a todo el mundo.
+        if !turn_urls.is_empty() && turn_shared_secret.is_empty() {
+            return Err(ConfigError::Missing {
+                name: "NEXUS_TURN_SHARED_SECRET",
             });
         }
 
@@ -136,26 +160,14 @@ impl Config {
                 min_len: MIN_SECRET_LEN,
             });
         }
-        if host_enrollment_token == turn_shared_secret {
+        if !turn_shared_secret.is_empty() && host_enrollment_token == turn_shared_secret {
             return Err(ConfigError::Invalid {
                 name: "NEXUS_HOST_ENROLLMENT_TOKEN",
                 value: "no puede ser igual al secreto de TURN".to_owned(),
             });
         }
 
-        let trust_proxy_header = match lookup("NEXUS_TRUST_PROXY_HEADER") {
-            None => false,
-            Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "si" => true,
-                "false" | "0" | "no" => false,
-                _ => {
-                    return Err(ConfigError::Invalid {
-                        name: "NEXUS_TRUST_PROXY_HEADER",
-                        value: raw,
-                    });
-                }
-            },
-        };
+        let trust_proxy_header = parse_bool(&lookup, "NEXUS_TRUST_PROXY_HEADER")?;
 
         let ttl_secs = match lookup("NEXUS_CREDENTIAL_TTL_SECS") {
             Some(raw) => raw.parse::<u64>().map_err(|_| ConfigError::Invalid {
@@ -181,6 +193,27 @@ impl Config {
             host_enrollment_token,
             trust_proxy_header,
         })
+    }
+}
+
+/// Lee una variable de si o no. Ausente cuenta como `false`.
+///
+/// Un valor que no sea claramente uno u otro se rechaza en lugar de
+/// interpretarse: "quiza" no es una respuesta valida a una pregunta de
+/// seguridad.
+fn parse_bool<F>(lookup: &F, name: &'static str) -> Result<bool, ConfigError>
+where
+    F: Fn(&'static str) -> Option<String>,
+{
+    match lookup(name) {
+        None => Ok(false),
+        // Una variable presente pero vacia cuenta como ausente: es lo que
+        // deja `docker compose` cuando el `.env` no la define.
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "si" => Ok(true),
+            "" | "false" | "0" | "no" => Ok(false),
+            _ => Err(ConfigError::Invalid { name, value: raw }),
+        },
     }
 }
 
@@ -365,13 +398,82 @@ mod tests {
     }
 
     #[test]
-    fn turn_urls_cannot_be_empty() {
+    fn con_turn_declarado_el_secreto_sigue_siendo_obligatorio() {
+        // Sin el no se pueden derivar credenciales y Coturn rechazaria a todos.
+        let mut env = base_env();
+        env.remove("NEXUS_TURN_SHARED_SECRET");
+        assert_eq!(
+            load(&env).unwrap_err(),
+            ConfigError::Missing {
+                name: "NEXUS_TURN_SHARED_SECRET"
+            }
+        );
+    }
+
+    #[test]
+    fn quedarse_sin_relay_por_descuido_se_rechaza() {
         let mut env = base_env();
         env.insert("NEXUS_TURN_URLS", ",  ,".to_owned());
+        let error = load(&env).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Invalid {
+                    name: "NEXUS_TURN_URLS",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("NEXUS_ALLOW_NO_RELAY"),
+            "el error debe decir como declararlo a proposito: {error}"
+        );
+    }
+
+    #[test]
+    fn quedarse_sin_relay_a_proposito_se_admite() {
+        // Es el montaje de quien aloja el servidor en su propio PC: el equipo
+        // se alcanza directamente y no hay nada que retransmitir.
+        let mut env = base_env();
+        env.remove("NEXUS_TURN_URLS");
+        env.remove("NEXUS_TURN_SHARED_SECRET");
+        env.insert("NEXUS_ALLOW_NO_RELAY", "true".to_owned());
+
+        let config = load(&env).expect("deberia cargar");
+        assert!(config.turn_urls.is_empty());
+        assert!(config.turn_shared_secret.is_empty());
+    }
+
+    #[test]
+    fn sin_relay_el_secreto_de_turn_deja_de_hacer_falta() {
+        let mut env = base_env();
+        env.remove("NEXUS_TURN_SHARED_SECRET");
+        env.remove("NEXUS_TURN_URLS");
+        env.insert("NEXUS_ALLOW_NO_RELAY", "si".to_owned());
+        load(&env).expect("sin TURN no hay secreto que exigir");
+    }
+
+    #[test]
+    fn un_secreto_de_turn_corto_sigue_siendo_un_error() {
+        // Peor que no tenerlo: aparenta proteger y no protege.
+        let mut env = base_env();
+        env.insert("NEXUS_TURN_SHARED_SECRET", "corto".to_owned());
+        env.insert("NEXUS_ALLOW_NO_RELAY", "true".to_owned());
+        assert!(matches!(
+            load(&env).unwrap_err(),
+            ConfigError::SecretTooShort { .. }
+        ));
+    }
+
+    #[test]
+    fn un_valor_poco_claro_en_la_renuncia_al_relay_se_rechaza() {
+        let mut env = base_env();
+        env.insert("NEXUS_ALLOW_NO_RELAY", "quiza".to_owned());
         assert!(matches!(
             load(&env).unwrap_err(),
             ConfigError::Invalid {
-                name: "NEXUS_TURN_URLS",
+                name: "NEXUS_ALLOW_NO_RELAY",
                 ..
             }
         ));

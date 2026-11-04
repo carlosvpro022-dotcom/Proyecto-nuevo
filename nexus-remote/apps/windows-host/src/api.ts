@@ -107,6 +107,12 @@ export interface PermissionEntry {
 
 export type PermissionProfile = "view_only" | "standard" | "full";
 
+/** Como se expone este equipo a la red. */
+export interface NetworkExposure {
+  udp_port: number;
+  public_endpoint: string | null;
+}
+
 /** Sesion en curso, tal como la informa el bucle del host. */
 export interface ActiveSession {
   sessionId: string;
@@ -402,6 +408,23 @@ export const api = {
 
   async sessionHistory(): Promise<SessionRow[]> {
     return call<SessionRow[]>("session_history");
+  },
+
+  async networkExposure(): Promise<NetworkExposure> {
+    return call<NetworkExposure>("network_exposure");
+  },
+
+  /**
+   * Guarda el puerto UDP fijo y la direccion publica de este equipo.
+   *
+   * Solo hace falta cuando el servidor esta en este mismo PC y se alcanza
+   * desde fuera por un puerto abierto en el router.
+   */
+  async setNetworkExposure(
+    udpPort: number,
+    publicEndpoint: string | null,
+  ): Promise<void> {
+    return call<void>("set_network_exposure", { udpPort, publicEndpoint });
   },
 
   async listMonitors(): Promise<MonitorInfo[]> {

@@ -51,20 +51,21 @@ impl IceConfiguration {
         }
     }
 
-    /// Comprueba que la configuracion permite conectar de verdad.
+    /// Comprueba que los servidores declarados sirven para algo.
+    ///
+    /// **No comprueba si la conexion podra salir de la red local**: eso
+    /// depende tambien de si el equipo anuncia una direccion publica propia,
+    /// que esta capa no conoce. Lo decide quien abre la conexion, que si tiene
+    /// las dos piezas.
+    ///
+    /// Una lista vacia es valida: es la configuracion de un equipo que se
+    /// alcanza directamente porque tiene un puerto abierto en su router.
     ///
     /// # Errors
     ///
-    /// [`TransportError::InvalidIceConfiguration`] si no hay servidores, si
-    /// alguno no es utilizable, o si se exige relay y no hay ningun TURN con
-    /// credenciales.
+    /// [`TransportError::InvalidIceConfiguration`] si algun servidor no es
+    /// utilizable, o si se exige relay y no hay ningun TURN con credenciales.
     pub fn validate(&self) -> TransportResult<()> {
-        if self.servers.is_empty() {
-            return Err(TransportError::InvalidIceConfiguration(
-                "no hay ningun servidor ICE configurado".to_owned(),
-            ));
-        }
-
         for (index, server) in self.servers.iter().enumerate() {
             if !server.is_usable() {
                 return Err(TransportError::InvalidIceConfiguration(format!(
@@ -148,9 +149,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_configuration_is_rejected() {
-        let err = IceConfiguration::new(vec![]).validate().unwrap_err();
-        assert!(matches!(err, TransportError::InvalidIceConfiguration(_)));
+    fn an_empty_configuration_is_structurally_valid() {
+        // Es la configuracion de un equipo que se alcanza directamente porque
+        // tiene un puerto abierto en su router. Si eso basta o no lo decide
+        // quien abre la conexion, que sabe si hay direccion publica declarada.
+        let config = IceConfiguration::new(vec![]);
+        config.validate().expect("no hay nada mal formado");
+        assert!(
+            !config.supports_remote_networks(),
+            "pero por si sola no llega a otra red"
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ import {
   type PairingView,
   type PermissionEntry,
   type PermissionProfile,
+  type NetworkExposure,
   type RuntimeStatus,
   type SessionRow,
   type SignalingProbe,
@@ -107,6 +108,7 @@ export function App() {
   const [checking, setChecking] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [exposure, setExposure] = useState<NetworkExposure | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -120,6 +122,7 @@ export function App() {
         engine,
         runtimeStatus,
         history,
+        network,
       ] = await Promise.all([
         api.hostSummary(),
         api.systemStatus(),
@@ -130,9 +133,11 @@ export function App() {
         api.engineStatus(),
         api.runtimeStatus(),
         api.sessionHistory(),
+        api.networkExposure(),
       ]);
       setRuntime(runtimeStatus);
       setSessions(history);
+      setExposure(network);
 
       // La enumeracion de monitores falla a proposito en las plataformas sin
       // backend. No es motivo para dejar el panel sin datos: se guarda el
@@ -335,8 +340,12 @@ export function App() {
           busy={busy}
           error={actionError}
           probe={probe}
+          exposure={exposure}
           checking={checking}
           onSaveSignalingUrl={(url) => void run(() => api.setSignalingUrl(url))}
+          onSaveNetwork={(udpPort, publicEndpoint) =>
+            void run(() => api.setNetworkExposure(udpPort, publicEndpoint))
+          }
           onCheckSignaling={(token) => {
             setChecking(true);
             setProbe(null);

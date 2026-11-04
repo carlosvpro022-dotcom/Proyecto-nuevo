@@ -37,6 +37,12 @@ use crate::store::Store;
 /// Clave del ajuste que guarda la URL del servidor de senalizacion.
 pub const SETTING_SIGNALING_URL: &str = "signaling_url";
 
+/// Puerto UDP fijo para la conexion cifrada, o `0` para que lo elija el sistema.
+pub const SETTING_UDP_PORT: &str = "udp_port";
+
+/// Direccion publica que anunciar: una IP o el nombre de un DNS dinamico.
+pub const SETTING_PUBLIC_ENDPOINT: &str = "public_endpoint";
+
 /// Emparejamiento abierto, con el codigo en claro para poder mostrarlo.
 ///
 /// El codigo vive aqui, en memoria, solo mientras el emparejamiento esta
@@ -380,6 +386,60 @@ impl HostService {
         self.store.set_setting(SETTING_SIGNALING_URL, trimmed)
     }
 
+    /// Guarda como se expone este equipo a la red.
+    ///
+    /// Hace falta cuando el servidor esta en este mismo PC y se alcanza desde
+    /// fuera abriendo un puerto en el router: ahi el puerto no puede ser al
+    /// azar y la direccion que el equipo ve de si mismo es privada.
+    ///
+    /// `public_endpoint` admite una IP o un nombre de dominio. Lo segundo es
+    /// lo normal en una casa, donde la IP cambia y el nombre de un DNS
+    /// dinamico no.
+    ///
+    /// # Errors
+    ///
+    /// - [`HostError::InvalidInput`] si el puerto esta reservado al sistema.
+    /// - [`HostError::Database`] si la escritura falla.
+    pub fn set_network_exposure(
+        &self,
+        udp_port: u16,
+        public_endpoint: Option<&str>,
+    ) -> HostResult<()> {
+        // Por debajo de 1024 hacen falta permisos de administrador en la
+        // mayoria de sistemas, y no hay motivo para pedirlos.
+        if udp_port != 0 && udp_port < 1024 {
+            return Err(HostError::InvalidInput(
+                "el puerto debe ser 0 (automatico) o estar entre 1024 y 65535".to_owned(),
+            ));
+        }
+
+        self.store
+            .set_setting(SETTING_UDP_PORT, &udp_port.to_string())?;
+
+        let endpoint = public_endpoint.map(str::trim).unwrap_or_default();
+        self.store.set_setting(SETTING_PUBLIC_ENDPOINT, endpoint)
+    }
+
+    /// Como se expone este equipo a la red.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Database`] si la lectura falla.
+    pub fn network_exposure(&self) -> HostResult<(u16, Option<String>)> {
+        let puerto = self
+            .store
+            .get_setting(SETTING_UDP_PORT)?
+            .and_then(|valor| valor.parse::<u16>().ok())
+            .unwrap_or(0);
+
+        let endpoint = self
+            .store
+            .get_setting(SETTING_PUBLIC_ENDPOINT)?
+            .filter(|valor| !valor.trim().is_empty());
+
+        Ok((puerto, endpoint))
+    }
+
     /// URL del servidor de senalizacion, si esta configurada.
     ///
     /// # Errors
@@ -499,6 +559,48 @@ mod tests {
     fn service() -> HostService {
         HostService::open_ephemeral(DeviceIdentity::generate(DeviceId::new()))
             .expect("servicio en memoria")
+    }
+
+    #[test]
+    fn por_omision_el_equipo_no_declara_nada_especial() {
+        let host = service();
+        assert_eq!(host.network_exposure().expect("lee"), (0, None));
+    }
+
+    #[test]
+    fn se_puede_fijar_el_puerto_y_el_nombre_publico() {
+        // Es la configuracion de quien aloja el servidor en su propio PC.
+        let host = service();
+        host.set_network_exposure(51_820, Some("casa.midominio.com"))
+            .expect("guarda");
+        assert_eq!(
+            host.network_exposure().expect("lee"),
+            (51_820, Some("casa.midominio.com".to_owned()))
+        );
+    }
+
+    #[test]
+    fn un_puerto_reservado_al_sistema_se_rechaza() {
+        let host = service();
+        let error = host
+            .set_network_exposure(443, None)
+            .expect_err("443 necesita permisos de administrador");
+        assert!(matches!(error, HostError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn el_puerto_automatico_sigue_valiendo() {
+        let host = service();
+        host.set_network_exposure(0, None).expect("vale");
+        assert_eq!(host.network_exposure().expect("lee").0, 0);
+    }
+
+    #[test]
+    fn un_nombre_publico_en_blanco_cuenta_como_ninguno() {
+        let host = service();
+        host.set_network_exposure(1_024, Some("   "))
+            .expect("guarda");
+        assert_eq!(host.network_exposure().expect("lee").1, None);
     }
 
     fn controller() -> (DeviceIdentity, DeviceInfo) {

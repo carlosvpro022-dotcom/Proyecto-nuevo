@@ -82,6 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // el panel pinta bien ese caso, que es el primero que vera cualquiera.
         "runtime_status": nexus_windows_host::supervisor::RuntimeStatus::stopped(),
         "session_history": host.store().list_sessions(100)?,
+        "network_exposure": {
+            "udp_port": host.network_exposure()?.0,
+            "public_endpoint": host.network_exposure()?.1,
+        },
         "current_pairing": {
             "pairing_id": session.id.to_string(),
             "code": code.grouped(),

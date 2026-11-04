@@ -43,9 +43,10 @@ use tokio::sync::{Mutex, mpsc};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{
     MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
-    RTCConfiguration, RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceGatheringState,
-    RTCIceServer, RTCIceTransportPolicy, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
-    RTCSessionDescription, Registry, register_default_interceptors,
+    RTCConfiguration, RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceCandidateType,
+    RTCIceGatheringState, RTCIceServer, RTCIceTransportPolicy, RTCPeerConnectionIceEvent,
+    RTCPeerConnectionState, RTCSessionDescription, Registry, SettingEngineBuilder,
+    register_default_interceptors,
 };
 
 use crate::error::{TransportError, TransportResult};
@@ -58,6 +59,94 @@ pub const INPUT_CHANNEL: &str = "input";
 
 /// Eventos que caben en la cola antes de que el consumidor los lea.
 const EVENT_QUEUE_DEPTH: usize = 256;
+
+/// Como se expone este extremo a la red.
+///
+/// Los valores por omision sirven para un equipo que sale a Internet por un
+/// servidor propio con STUN y TURN. Hacen falta otros cuando el equipo esta en
+/// casa, detras de un router, y se quiere alcanzar desde fuera abriendo un
+/// puerto: ahi el puerto no puede ser al azar, y el equipo tiene que anunciar
+/// su direccion publica en lugar de la privada.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NetworkOptions {
+    /// Puerto UDP local, o `0` para que lo elija el sistema.
+    ///
+    /// Un puerto al azar no se puede abrir en un router: no se sabe cual sera.
+    /// Fijarlo es lo que permite el reenvio de puertos.
+    ///
+    /// Con un puerto fijo solo cabe una conexion a la vez, que es justo lo que
+    /// el host admite de todos modos: un escritorio, una sesion.
+    pub udp_port: u16,
+
+    /// Direccion publica que anunciar en lugar de la local.
+    ///
+    /// Cuando el equipo esta detras de un router con el puerto abierto, la
+    /// direccion que ve de si mismo es privada y no le sirve de nada al otro
+    /// extremo. Declarando aqui la publica se anuncia la correcta sin
+    /// necesidad de preguntarsela a un servidor STUN.
+    ///
+    /// Si la direccion cambia (una IP domestica cambia), hay que volver a
+    /// abrir la conexion con la nueva.
+    pub public_ip: Option<String>,
+}
+
+impl NetworkOptions {
+    /// Indica si hay algo que configurar mas alla de lo normal.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        self.udp_port == 0 && self.public_ip.is_none()
+    }
+
+    /// Direccion de escucha que corresponde a estas opciones.
+    #[must_use]
+    pub fn bind_address(&self) -> String {
+        format!("0.0.0.0:{}", self.udp_port)
+    }
+}
+
+/// Averigua la direccion IP que hay que anunciar.
+///
+/// Admite tanto una IP como un nombre de dominio. Lo segundo es lo normal en
+/// una casa: la IP que da el operador cambia, y lo que se mantiene es el nombre
+/// de un DNS dinamico. Resolviendolo cada vez que se abre una sesion, un cambio
+/// de IP se recoge solo en la siguiente conexion.
+///
+/// # Errors
+///
+/// [`TransportError::InvalidIceConfiguration`] si el nombre no resuelve a
+/// ninguna direccion IPv4.
+pub async fn resolve_public_ip(endpoint: &str) -> TransportResult<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(TransportError::InvalidIceConfiguration(
+            "la direccion publica esta vacia".to_owned(),
+        ));
+    }
+
+    if let Ok(direccion) = endpoint.parse::<std::net::IpAddr>() {
+        return Ok(direccion.to_string());
+    }
+
+    // El puerto da igual: solo se usa para poder resolver el nombre.
+    let mut candidatos = tokio::net::lookup_host(format!("{endpoint}:443"))
+        .await
+        .map_err(|e| {
+            TransportError::InvalidIceConfiguration(format!("no se pudo resolver {endpoint}: {e}"))
+        })?;
+
+    // Se busca IPv4 a proposito: es la que lleva el reenvio de puertos de un
+    // router domestico. Una IPv6 no necesita reenvio y se descubre sola.
+    candidatos
+        .find_map(|socket| match socket.ip() {
+            std::net::IpAddr::V4(v4) => Some(v4.to_string()),
+            std::net::IpAddr::V6(_) => None,
+        })
+        .ok_or_else(|| {
+            TransportError::InvalidIceConfiguration(format!(
+                "{endpoint} no resuelve a ninguna direccion IPv4"
+            ))
+        })
+}
 
 /// Papel del extremo en la negociacion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,16 +371,49 @@ impl PeerSession {
     ///   sirve para conectar.
     /// - [`TransportError::Peer`] si la pila WebRTC no arranca.
     pub async fn open(ice: &IceConfiguration, role: PeerRole) -> TransportResult<Self> {
+        Self::open_with(ice, role, &NetworkOptions::default()).await
+    }
+
+    /// Abre la conexion indicando como se expone este extremo a la red.
+    ///
+    /// Es lo que hace falta cuando el equipo esta en casa detras de un router:
+    /// un puerto fijo que se pueda abrir y la direccion publica que anunciar.
+    ///
+    /// # Errors
+    ///
+    /// Igual que [`Self::open`].
+    pub async fn open_with(
+        ice: &IceConfiguration,
+        role: PeerRole,
+        network: &NetworkOptions,
+    ) -> TransportResult<Self> {
         // El futuro de la apertura mide unos 20 KB: la pila de WebRTC arrastra
         // el motor de medios, el registro de interceptores y la configuracion
         // completa. Se reserva en el monton una vez, al abrir, para que ese
         // tamano no se propague a quien llame desde un `select!` o lo meta en
         // una tarea.
-        Box::pin(Self::open_inner(ice, role)).await
+        Box::pin(Self::open_inner(ice, role, network)).await
     }
 
-    async fn open_inner(ice: &IceConfiguration, role: PeerRole) -> TransportResult<Self> {
+    async fn open_inner(
+        ice: &IceConfiguration,
+        role: PeerRole,
+        network: &NetworkOptions,
+    ) -> TransportResult<Self> {
         ice.validate()?;
+
+        // Aqui si se puede decidir: una conexion llega a otra red si hay
+        // descubrimiento o retransmision, **o** si este equipo anuncia una
+        // direccion publica propia porque tiene un puerto abierto. Sin
+        // ninguna de las dos cosas solo funcionaria dentro de la misma red, y
+        // eso es justo el fallo que este proyecto no debe tener.
+        if !ice.supports_remote_networks() && network.public_ip.is_none() {
+            return Err(TransportError::InvalidIceConfiguration(
+                "sin servidores STUN o TURN, y sin una direccion publica propia, \
+                 la conexion solo funcionaria dentro de la misma red"
+                    .to_owned(),
+            ));
+        }
 
         let (sender, events) = mpsc::channel(EVENT_QUEUE_DEPTH);
         let channels: ChannelMap = Arc::new(Mutex::new(HashMap::new()));
@@ -310,14 +432,24 @@ impl PeerSession {
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)
             .map_err(|e| TransportError::Peer(e.to_string()))?;
 
+        let mut settings = SettingEngineBuilder::new();
+        if let Some(ip) = &network.public_ip {
+            // Se anuncia como candidato "host" y no "srflx" porque desde fuera
+            // esa direccion es alcanzable directamente: hay un puerto abierto
+            // que lleva hasta aqui.
+            settings = settings.with_nat_1to1_ips(vec![ip.clone()], RTCIceCandidateType::Host);
+        }
+
         let builder = PeerConnectionBuilder::new()
             .with_configuration(rtc_configuration(ice))
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .with_handler(Arc::new(bridge))
-            // Puerto efimero en todas las interfaces: los caminos utiles los
-            // descubre ICE.
-            .with_udp_addrs(vec!["0.0.0.0:0".to_owned()]);
+            .with_setting_engine(settings.build())
+            // Escucha en todas las interfaces. El puerto es el que digan las
+            // opciones: al azar si sale por un servidor propio, fijo si hay que
+            // abrirlo en un router.
+            .with_udp_addrs(vec![network.bind_address()]);
 
         let connection = Box::pin(builder.build())
             .await
@@ -583,6 +715,96 @@ mod tests {
         assert_eq!(init.max_packet_life_time, None);
     }
 
+    #[test]
+    fn por_omision_el_puerto_lo_elige_el_sistema() {
+        let opciones = NetworkOptions::default();
+        assert!(opciones.is_default());
+        assert_eq!(opciones.bind_address(), "0.0.0.0:0");
+        assert!(opciones.public_ip.is_none());
+    }
+
+    #[test]
+    fn un_puerto_fijo_se_refleja_en_la_direccion_de_escucha() {
+        // Es lo que permite abrirlo en el router: un puerto al azar no se
+        // puede reenviar porque no se sabe cual sera.
+        let opciones = NetworkOptions {
+            udp_port: 51_820,
+            public_ip: None,
+        };
+        assert_eq!(opciones.bind_address(), "0.0.0.0:51820");
+        assert!(!opciones.is_default());
+    }
+
+    #[test]
+    fn declarar_una_ip_publica_no_es_la_configuracion_normal() {
+        let opciones = NetworkOptions {
+            udp_port: 0,
+            public_ip: Some("198.51.100.7".to_owned()),
+        };
+        assert!(!opciones.is_default());
+    }
+
+    #[tokio::test]
+    async fn una_conexion_con_puerto_fijo_escucha_donde_se_le_dice() {
+        // Se abren dos a la vez con el mismo puerto: la segunda debe fallar.
+        // No es un defecto, es la consecuencia de fijar el puerto, y conviene
+        // que quede comprobada para que nadie la descubra en produccion.
+        let opciones = NetworkOptions {
+            udp_port: 45_671,
+            public_ip: None,
+        };
+        let primera = PeerSession::open_with(
+            &IceConfiguration::new(vec![stun()]),
+            PeerRole::Offerer,
+            &opciones,
+        )
+        .await
+        .expect("la primera deberia abrir");
+
+        let segunda = PeerSession::open_with(
+            &IceConfiguration::new(vec![stun()]),
+            PeerRole::Offerer,
+            &opciones,
+        )
+        .await;
+
+        assert!(
+            segunda.is_err(),
+            "dos conexiones no pueden compartir un puerto fijo"
+        );
+        let _ = primera.close().await;
+    }
+
+    #[tokio::test]
+    async fn una_ip_se_devuelve_tal_cual() {
+        assert_eq!(
+            resolve_public_ip("198.51.100.7").await.expect("vale"),
+            "198.51.100.7"
+        );
+        assert_eq!(
+            resolve_public_ip("  198.51.100.7  ").await.expect("vale"),
+            "198.51.100.7"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_nombre_se_resuelve() {
+        // Es el caso de un DNS dinamico domestico, donde la IP cambia y el
+        // nombre no.
+        let resuelto = resolve_public_ip("localhost").await.expect("resuelve");
+        assert_eq!(resuelto, "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn una_direccion_vacia_o_imposible_se_rechaza() {
+        for malo in ["", "   "] {
+            assert!(
+                resolve_public_ip(malo).await.is_err(),
+                "{malo:?} deberia rechazarse"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn an_unusable_ice_configuration_is_refused_before_opening_anything() {
         let local_only = IceServer {
@@ -607,13 +829,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_ice_configuration_is_refused() {
+    async fn sin_servidores_ni_direccion_publica_se_rechaza() {
         let error = PeerSession::open(&IceConfiguration::new(vec![]), PeerRole::Offerer)
             .await
-            .expect_err("sin servidores ICE no se puede conectar");
-        assert!(
-            matches!(error, TransportError::InvalidIceConfiguration(_)),
-            "{error:?}"
-        );
+            .expect_err("eso solo funcionaria en la red local");
+        match error {
+            TransportError::InvalidIceConfiguration(detalle) => {
+                assert!(detalle.contains("misma red"), "{detalle}");
+            }
+            otro => panic!("se esperaba un fallo de configuracion, llego {otro:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sin_servidores_pero_con_direccion_publica_si_vale() {
+        // Es el montaje de quien aloja el servidor en su propio PC: no hay
+        // STUN ni TURN, pero hay un puerto abierto que lleva hasta aqui.
+        let sesion = PeerSession::open_with(
+            &IceConfiguration::new(vec![]),
+            PeerRole::Offerer,
+            &NetworkOptions {
+                udp_port: 0,
+                public_ip: Some("198.51.100.7".to_owned()),
+            },
+        )
+        .await
+        .expect("deberia abrir");
+        let _ = sesion.close().await;
     }
 }
