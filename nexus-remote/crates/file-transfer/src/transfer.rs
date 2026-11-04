@@ -15,9 +15,25 @@ use crate::error::{FileError, FileResult};
 
 /// Tamano de trozo con el que se parte un archivo.
 ///
-/// 64 KiB encaja holgadamente en el limite practico de un mensaje del canal de
-/// datos de WebRTC y deja margen para la cabecera del propio protocolo.
-pub const CHUNK_SIZE_BYTES: usize = 64 * 1024;
+/// No es un numero redondo por una razon concreta: un mensaje del canal de
+/// datos no puede pasar de 65 536 bytes. Es el valor por omision que fija el
+/// [RFC 8841] para SCTP, y el que aplican tanto esta biblioteca como la pila
+/// WebRTC de los navegadores y de iOS, asi que pasarse no es una opcion si el
+/// iPhone tiene que entenderse con el host.
+///
+/// El trozo tiene que dejar sitio a la cabecera del marco
+/// ([`HEADER_BYTES`](crate::frame::HEADER_BYTES)). 63 KiB lo deja con margen
+/// de sobra y mantiene el trozo alineado a kibibytes.
+///
+/// [RFC 8841]: https://datatracker.ietf.org/doc/html/rfc8841#section-6.1-4
+pub const CHUNK_SIZE_BYTES: usize = 63 * 1024;
+
+/// Tope de un mensaje del canal de datos, segun el RFC 8841.
+///
+/// Esta aqui para que [`MAX_FRAME_BYTES`](crate::frame::MAX_FRAME_BYTES) pueda
+/// comprobarse contra el en tiempo de compilacion: es el error que, sin esa
+/// comprobacion, solo aparece al mover un archivo grande en hardware real.
+pub const SCTP_MAX_MESSAGE_BYTES: usize = 65_536;
 
 /// Tamano maximo de archivo admitido por omision (4 GiB).
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -151,8 +167,16 @@ impl TransferTracker {
 
     /// Anota bytes transferidos y devuelve el estado actualizado.
     ///
-    /// Si con estos bytes se alcanza el total conocido, la transferencia pasa a
-    /// [`TransferState::Completed`] automaticamente.
+    /// Al alcanzar el total conocido, una **descarga** pasa sola a
+    /// [`TransferState::Completed`]: cuando salieron todos los bytes del
+    /// archivo, el host ya no tiene nada mas que hacer.
+    ///
+    /// Una **subida** no. Tener todos los bytes no significa que este
+    /// completa: falta comprobar que el contenido coincide con el resumen que
+    /// anuncio quien envia. Darla por buena al contar los bytes haria que una
+    /// subida con el contenido cambiado se anotara como completada y despues
+    /// fallara, lo que es exactamente al reves de como debe leerse. Quien
+    /// verifica es quien la cierra, con [`TransferTracker::complete`].
     ///
     /// # Errors
     ///
@@ -192,10 +216,32 @@ impl TransferTracker {
 
         transfer.transferred_bytes = next;
         transfer.updated_at = now;
-        transfer.state = match transfer.total_bytes {
-            Some(total) if next >= total => TransferState::Completed,
+        transfer.state = match (transfer.direction, transfer.total_bytes) {
+            (Direction::Download, Some(total)) if next >= total => TransferState::Completed,
             _ => TransferState::Active,
         };
+        Ok(transfer.clone())
+    }
+
+    /// Da una transferencia por terminada con exito.
+    ///
+    /// Es la unica forma de completar una subida: la decide quien comprobo que
+    /// el contenido recibido coincide con su resumen.
+    ///
+    /// # Errors
+    ///
+    /// - [`FileError::UnknownTransfer`] si el identificador no existe.
+    /// - [`FileError::TransferFinished`] si ya habia terminado.
+    pub fn complete(&mut self, id: TransferId, now: Timestamp) -> FileResult<Transfer> {
+        let transfer = self
+            .transfers
+            .get_mut(&id)
+            .ok_or(FileError::UnknownTransfer)?;
+        if !transfer.is_active() {
+            return Err(FileError::TransferFinished);
+        }
+        transfer.state = TransferState::Completed;
+        transfer.updated_at = now;
         Ok(transfer.clone())
     }
 
@@ -391,6 +437,71 @@ mod tests {
             }
         );
         assert_eq!(t.active_count(), 0);
+    }
+
+    #[test]
+    fn an_upload_is_not_complete_just_because_the_bytes_arrived() {
+        // El motivo: entre el ultimo byte y el final hay una comprobacion de
+        // integridad. Darla por completa antes seria anunciar como terminado
+        // algo que todavia puede rechazarse.
+        let mut t = tracker();
+        let transfer = t
+            .start(
+                Direction::Upload,
+                PathBuf::from("/compartido/sube.bin"),
+                Some(500),
+                NOW,
+            )
+            .expect("abre");
+
+        let updated = t.advance(transfer.id, 500, NOW).expect("avanza");
+        assert_eq!(
+            updated.state,
+            TransferState::Active,
+            "la subida sigue viva hasta que se verifique"
+        );
+        assert_eq!(updated.progress_percent(), Some(100));
+        assert!(updated.is_active());
+
+        let done = t.complete(transfer.id, Timestamp(3_000)).expect("cierra");
+        assert_eq!(done.state, TransferState::Completed);
+        assert_eq!(done.updated_at, Timestamp(3_000));
+        assert_eq!(t.active_count(), 0);
+    }
+
+    #[test]
+    fn a_download_still_completes_on_its_own_when_every_byte_is_out() {
+        let mut t = tracker();
+        let transfer = start(&mut t, Some(400));
+        let done = t.advance(transfer.id, 400, NOW).expect("avanza");
+        assert_eq!(done.state, TransferState::Completed);
+    }
+
+    #[test]
+    fn a_failed_upload_cannot_be_completed_afterwards() {
+        let mut t = tracker();
+        let transfer = t
+            .start(
+                Direction::Upload,
+                PathBuf::from("/compartido/sube.bin"),
+                Some(10),
+                NOW,
+            )
+            .expect("abre");
+        t.fail(transfer.id, NOW).expect("falla");
+        assert_eq!(
+            t.complete(transfer.id, NOW).unwrap_err(),
+            FileError::TransferFinished
+        );
+    }
+
+    #[test]
+    fn completing_something_that_does_not_exist_is_reported() {
+        let mut t = tracker();
+        assert_eq!(
+            t.complete(TransferId::new(), NOW).unwrap_err(),
+            FileError::UnknownTransfer
+        );
     }
 
     #[test]

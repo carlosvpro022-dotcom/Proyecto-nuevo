@@ -14,11 +14,14 @@
 
 use nexus_core::monitor::MonitorLayout;
 use nexus_core::protocol::Envelope;
-use nexus_core::protocol::control::{ControlMessage, ControlRequest, ControlResponse};
+use nexus_core::protocol::control::{ControlMessage, ControlRequest, ControlResponse, HostEvent};
 use nexus_core::{CoreError, PermissionSet, Timestamp};
+use nexus_file_transfer::AccessPolicy;
+use nexus_file_transfer::error::FileError;
 use nexus_input::{InputInjector, resolve};
 
 use crate::error::{HostError, HostResult};
+use crate::files::{Download, FileService, TransferReport, deny_code, deny_message};
 
 /// Atiende el canal de control de una sesion establecida.
 pub struct SessionHandler {
@@ -26,6 +29,14 @@ pub struct SessionHandler {
     monitors: MonitorLayout,
     active_monitor: u8,
     injector: Box<dyn InputInjector + Send>,
+    files: FileService,
+    /// Descargas aceptadas que todavia no se han puesto en marcha.
+    ///
+    /// Esta aqui, y no se envia desde `handle`, porque enviar un archivo tarda
+    /// y este manejador tambien atiende el raton. Quien llama recoge la
+    /// descarga con [`SessionHandler::take_pending_download`] y la pone en su
+    /// propia tarea.
+    pending_downloads: Vec<Download>,
     applied: u64,
     refused: u64,
 }
@@ -35,6 +46,7 @@ impl std::fmt::Debug for SessionHandler {
         f.debug_struct("SessionHandler")
             .field("permissions", &self.permissions)
             .field("active_monitor", &self.active_monitor)
+            .field("transferencias", &self.files.active_count())
             .field("applied", &self.applied)
             .field("refused", &self.refused)
             .finish_non_exhaustive()
@@ -61,9 +73,46 @@ impl SessionHandler {
             monitors,
             active_monitor,
             injector,
+            // Sin carpetas declaradas no se comparte nada. Es el valor por
+            // omision a proposito: el acceso al disco se concede, no se hereda
+            // de tener permiso de archivos.
+            files: FileService::new(AccessPolicy::empty()),
+            pending_downloads: Vec::new(),
             applied: 0,
             refused: 0,
         }
+    }
+
+    /// Declara las carpetas que esta sesion puede ver.
+    ///
+    /// Sin esto, el permiso de archivos no sirve de nada: la politica vacia
+    /// rechaza todas las rutas. Son dos concesiones separadas a proposito, una
+    /// del dispositivo y otra del disco.
+    #[must_use]
+    pub fn with_shared_folders(mut self, policy: AccessPolicy) -> Self {
+        self.files = FileService::new(policy);
+        self
+    }
+
+    /// Recoge una descarga aceptada para ponerla en marcha.
+    ///
+    /// Quien llama tiene que vaciar esta cola despues de cada
+    /// [`SessionHandler::handle`]: una descarga que no se recoge no envia nada
+    /// y se queda ocupando una plaza.
+    pub fn take_pending_download(&mut self) -> Option<Download> {
+        self.pending_downloads.pop()
+    }
+
+    /// Indica si el host comparte alguna carpeta en esta sesion.
+    #[must_use]
+    pub fn shares_no_folders(&self) -> bool {
+        self.files.shares_nothing()
+    }
+
+    /// Transferencias de archivos activas.
+    #[must_use]
+    pub fn active_transfers(&self) -> usize {
+        self.files.active_count()
     }
 
     /// Monitor que se esta transmitiendo.
@@ -151,6 +200,43 @@ impl SessionHandler {
                         .map(Some)
                 }
             }
+            ControlRequest::ListDir { path, offset } => match self.files.list(&path, offset) {
+                Ok(response) => {
+                    self.applied = self.applied.saturating_add(1);
+                    Self::respond(response).map(Some)
+                }
+                Err(error) => self.refuse_file(&error).map(Some),
+            },
+            ControlRequest::DownloadStart { path } => {
+                match self.files.start_download(&path, Timestamp::now()) {
+                    Ok((response, download)) => {
+                        self.applied = self.applied.saturating_add(1);
+                        // No se envia nada aqui: la descarga sale en su propia
+                        // tarea para no dejar el raton esperando detras.
+                        self.pending_downloads.push(download);
+                        Self::respond(response).map(Some)
+                    }
+                    Err(error) => self.refuse_file(&error).map(Some),
+                }
+            }
+            ControlRequest::UploadStart { path, size_bytes } => {
+                match self.files.start_upload(&path, size_bytes, Timestamp::now()) {
+                    Ok(response) => {
+                        self.applied = self.applied.saturating_add(1);
+                        Self::respond(response).map(Some)
+                    }
+                    Err(error) => self.refuse_file(&error).map(Some),
+                }
+            }
+            ControlRequest::TransferCancel { transfer_id } => {
+                match self.files.cancel(transfer_id, Timestamp::now()) {
+                    Ok(event) => {
+                        self.applied = self.applied.saturating_add(1);
+                        Self::event(event).map(Some)
+                    }
+                    Err(error) => self.refuse_file(&error).map(Some),
+                }
+            }
             // El resto del protocolo de control corresponde a la etapa 5. Se
             // contesta que no esta disponible, que es la verdad, en lugar de
             // callar y dejar al cliente esperando.
@@ -164,6 +250,66 @@ impl SessionHandler {
                 )
                 .map(Some),
         }
+    }
+
+    /// Atiende un marco binario llegado por el canal de archivos.
+    ///
+    /// Devuelve el mensaje a enviar por el canal de control (un progreso, o el
+    /// rechazo si el marco no vale), o `None` cuando no toca decir nada.
+    ///
+    /// El permiso ya se comprobo al abrir la transferencia: un marco solo puede
+    /// alimentar una subida que este manejador acepto, y
+    /// [`FileService::on_frame`](crate::files::FileService::on_frame) rechaza
+    /// cualquier identificador que no sea uno de los suyos.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Protocol`] solo si la respuesta no se puede codificar.
+    pub fn handle_file_frame(&mut self, raw: &[u8]) -> HostResult<Option<String>> {
+        match self.files.on_frame(raw, Timestamp::now()) {
+            Ok(Some(event)) => Self::event(event).map(Some),
+            Ok(None) => Ok(None),
+            Err(error) => {
+                tracing::warn!(%error, "se rechazo un marco del canal de archivos");
+                self.refuse_file(&error).map(Some)
+            }
+        }
+    }
+
+    /// Recoge lo que cuenta la tarea que esta enviando una descarga.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Protocol`] solo si el evento no se puede codificar.
+    pub fn handle_transfer_report(
+        &mut self,
+        report: &TransferReport,
+    ) -> HostResult<Option<String>> {
+        match self.files.on_report(report, Timestamp::now()) {
+            Some(event) => Self::event(event).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Cierra las transferencias al terminar la sesion.
+    ///
+    /// Las subidas a medias se abandonan y sus temporales se borran: un archivo
+    /// incompleto no se queda en la carpeta compartida porque el iPad se fuera
+    /// de cobertura.
+    pub fn end(&mut self) {
+        self.files.end(Timestamp::now());
+        self.pending_downloads.clear();
+    }
+
+    /// Rechaza una operacion de archivos con su codigo estable.
+    fn refuse_file(&mut self, error: &FileError) -> HostResult<String> {
+        self.deny(deny_code(error), &deny_message(error))
+    }
+
+    fn event(event: HostEvent) -> HostResult<String> {
+        Envelope::at(Timestamp::now(), ControlMessage::Event(event))
+            .encode()
+            .map_err(|e| HostError::Protocol(e.to_string()))
     }
 
     fn decode(raw: &str) -> Result<ControlRequest, String> {
@@ -201,7 +347,7 @@ const fn operation_name(request: &ControlRequest) -> &'static str {
         ControlRequest::SetQuality { .. } => "cambiar calidad",
         ControlRequest::ClipboardGet => "leer el portapapeles",
         ControlRequest::ClipboardSet { .. } => "escribir el portapapeles",
-        ControlRequest::ListDir { .. } => "listar un directorio",
+
         _ => "esa",
     }
 }
@@ -213,6 +359,7 @@ mod tests {
     use nexus_core::protocol::input::{InputEvent, KeyState, PointerButton};
     use nexus_core::{Permission, QualityPreset, QualityProfile};
     use nexus_input::{RecordingInjector, ResolvedInput};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     fn monitors() -> MonitorLayout {
@@ -338,6 +485,115 @@ mod tests {
             "no debe tocar el inyector"
         );
         assert_eq!(probe.handler.refused(), 1);
+    }
+
+    /// Un manejador con una carpeta compartida y los permisos que se digan.
+    fn probe_con_carpetas(permissions: PermissionSet) -> (Probe, tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().expect("carpeta temporal");
+        let compartida = temp.path().join("intercambio");
+        std::fs::create_dir_all(&compartida).expect("crea carpeta");
+        std::fs::write(compartida.join("dato.txt"), b"contenido").expect("crea archivo");
+
+        let injector = SharedInjector::default();
+        let handler = SessionHandler::new(permissions, monitors(), Box::new(injector.clone()))
+            .with_shared_folders(nexus_file_transfer::AccessPolicy::new(vec![
+                nexus_file_transfer::SharedRoot::writable("Intercambio", &compartida),
+            ]));
+        (Probe { handler, injector }, temp, compartida)
+    }
+
+    #[test]
+    fn sin_permiso_de_archivos_no_se_lista_ni_se_descarga() {
+        let (mut probe, _temp, compartida) =
+            probe_con_carpetas(PermissionSet::from_iter([Permission::ViewScreen]));
+
+        for request in [
+            ControlRequest::ListDir {
+                path: compartida.to_string_lossy().into_owned(),
+                offset: 0,
+            },
+            ControlRequest::DownloadStart {
+                path: compartida.join("dato.txt").to_string_lossy().into_owned(),
+            },
+        ] {
+            match probe.send(request) {
+                Some(ControlResponse::Denied { code, .. }) => {
+                    assert_eq!(code, "permission_denied");
+                }
+                otro => panic!("deberia rechazarse por permiso, llego {otro:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn con_permiso_de_solo_lectura_no_se_puede_subir_nada() {
+        // El limite que importa: la carpeta compartida admite escritura, pero
+        // el dispositivo no tiene el permiso. Lo uno no suple lo otro.
+        let (mut probe, _temp, compartida) = probe_con_carpetas(PermissionSet::from_iter([
+            Permission::ViewScreen,
+            Permission::FileRead,
+        ]));
+
+        // Leer si puede.
+        probe
+            .send(ControlRequest::ListDir {
+                path: compartida.to_string_lossy().into_owned(),
+                offset: 0,
+            })
+            .expect("deberia contestar");
+
+        // Escribir no.
+        let destino = compartida.join("nuevo.bin");
+        match probe.send(ControlRequest::UploadStart {
+            path: destino.to_string_lossy().into_owned(),
+            size_bytes: 4,
+        }) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "permission_denied");
+            }
+            otro => panic!("deberia rechazarse por permiso, llego {otro:?}"),
+        }
+        assert!(!destino.exists(), "no debe crearse nada");
+
+        // Y los marcos que envie por el canal de archivos no tienen donde ir:
+        // sin subida abierta, no hay nada que alimentar.
+        let frame = nexus_file_transfer::Frame::Data {
+            transfer_id: nexus_core::TransferId::new(),
+            sequence: 0,
+            payload: b"cola".to_vec(),
+        };
+        let respuesta = probe
+            .handler
+            .handle_file_frame(&frame.encode())
+            .expect("no debe fallar")
+            .expect("deberia contestar");
+        assert!(
+            respuesta.contains("unknown_transfer"),
+            "el marco no debe encontrar transferencia: {respuesta}"
+        );
+        assert!(!destino.exists());
+        let restos: Vec<_> = std::fs::read_dir(&compartida)
+            .expect("lee")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "dato.txt")
+            .collect();
+        assert!(restos.is_empty(), "quedaron restos: {restos:?}");
+    }
+
+    #[test]
+    fn un_manejador_recien_creado_no_comparte_ninguna_carpeta() {
+        // El valor por omision: tener el permiso no abre el disco.
+        let mut probe = Probe::with(PermissionSet::full());
+        assert!(probe.handler.shares_no_folders());
+        match probe.send(ControlRequest::ListDir {
+            path: "/tmp".to_owned(),
+            offset: 0,
+        }) {
+            Some(ControlResponse::Denied { code, .. }) => assert_eq!(code, "access_denied"),
+            otro => panic!("deberia rechazarse por no haber carpetas, llego {otro:?}"),
+        }
+        assert_eq!(probe.handler.active_transfers(), 0);
     }
 
     #[test]

@@ -2,7 +2,12 @@
 
 import { useState } from "react";
 
-import type { HostSummary, NetworkExposure, SignalingProbe } from "../api";
+import type {
+  HostSummary,
+  NetworkExposure,
+  SharedFolder,
+  SignalingProbe,
+} from "../api";
 import { Card, Notice } from "../components/ui";
 
 export function Settings({
@@ -10,8 +15,10 @@ export function Settings({
   onSaveSignalingUrl,
   onCheckSignaling,
   onSaveNetwork,
+  onSaveSharedFolders,
   probe,
   exposure,
+  folders,
   checking,
   busy,
   error,
@@ -20,8 +27,10 @@ export function Settings({
   onSaveSignalingUrl: (url: string) => void;
   onCheckSignaling: (enrollmentToken: string) => void;
   onSaveNetwork: (udpPort: number, publicEndpoint: string | null) => void;
+  onSaveSharedFolders: (folders: SharedFolder[]) => void;
   probe: SignalingProbe | null;
   exposure: NetworkExposure | null;
+  folders: SharedFolder[];
   checking: boolean;
   busy: boolean;
   error: string | null;
@@ -227,6 +236,12 @@ export function Settings({
         )}
       </Card>
 
+      <SharedFoldersCard
+        folders={folders}
+        busy={busy}
+        onSave={onSaveSharedFolders}
+      />
+
       <Card title="Calidad de transmision" hint="Se aplicara cuando haya transmision de pantalla (etapa 5).">
         <Notice>
           Los perfiles de calidad (fluido, equilibrado, nitido y automatico) ya estan
@@ -266,5 +281,175 @@ export function Settings({
         </div>
       </Card>
     </div>
+  );
+}
+
+/**
+ * Las carpetas que este equipo comparte.
+ *
+ * Es la pantalla que decide a que puede llegar un dispositivo remoto. Por eso
+ * dice lo que de verdad hace falta saber: que sin ninguna carpeta no se
+ * comparte nada, y que marcar la escritura permite dejar y sobrescribir
+ * archivos dentro.
+ */
+function SharedFoldersCard({
+  folders,
+  busy,
+  onSave,
+}: {
+  folders: SharedFolder[];
+  busy: boolean;
+  onSave: (folders: SharedFolder[]) => void;
+}) {
+  const [draft, setDraft] = useState<SharedFolder[]>(folders);
+  const [label, setLabel] = useState("");
+  const [path, setPath] = useState("");
+  const [writable, setWritable] = useState(false);
+
+  const canAdd = label.trim().length > 0 && path.trim().length > 0;
+  const dirty = JSON.stringify(draft) !== JSON.stringify(folders);
+
+  function add() {
+    if (!canAdd) return;
+    setDraft([
+      ...draft,
+      { label: label.trim(), path: path.trim(), writable },
+    ]);
+    setLabel("");
+    setPath("");
+    setWritable(false);
+  }
+
+  return (
+    <Card
+      title="Carpetas compartidas"
+      hint="A lo unico que un dispositivo remoto puede llegar. Fuera de esta lista, nada."
+    >
+      {draft.length === 0 ? (
+        <Notice>
+          Ahora mismo no se comparte ninguna carpeta, asi que ningun dispositivo
+          puede ver archivos de este PC, ni aunque tenga el permiso concedido.
+          Son dos cosas separadas a proposito: el permiso lo tiene el
+          dispositivo, la carpeta la elige usted aqui.
+        </Notice>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Carpeta en este PC</th>
+              <th>Pueden escribir</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {draft.map((folder, index) => (
+              <tr key={`${folder.path}-${index}`}>
+                <td>{folder.label}</td>
+                <td className="mono" style={{ wordBreak: "break-all" }}>
+                  {folder.path}
+                </td>
+                <td className="mono">{folder.writable ? "si" : "no"}</td>
+                <td>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() =>
+                      setDraft(draft.filter((_, i) => i !== index))
+                    }
+                  >
+                    Quitar
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="grid grid--two" style={{ marginTop: "var(--space-4)" }}>
+        <div className="field">
+          <label className="field__label" htmlFor="shared-label">
+            Nombre que vera quien se conecte
+          </label>
+          <input
+            id="shared-label"
+            className="input"
+            type="text"
+            value={label}
+            placeholder="Intercambio"
+            onChange={(event) => setLabel(event.target.value)}
+          />
+        </div>
+
+        <div className="field">
+          <label className="field__label" htmlFor="shared-path">
+            Carpeta en este PC
+          </label>
+          <input
+            id="shared-path"
+            className="input"
+            type="text"
+            value={path}
+            placeholder="C:\\Users\\usuario\\Intercambio"
+            spellCheck={false}
+            onChange={(event) => setPath(event.target.value)}
+          />
+          <span className="field__hint">
+            Ruta completa. Tiene que existir, y no puede ser la raiz de un
+            disco: compartir <span className="mono">C:\</span> entero anula el
+            sentido de tener una lista.
+          </span>
+        </div>
+      </div>
+
+      <label className="row" style={{ marginTop: "var(--space-3)", gap: "var(--space-2)" }}>
+        <input
+          type="checkbox"
+          checked={writable}
+          onChange={(event) => setWritable(event.target.checked)}
+        />
+        <span className="field__hint">
+          Permitir escribir dentro. Sin marcar, solo se puede mirar y
+          descargar; marcado, tambien dejar archivos.
+        </span>
+      </label>
+
+      <div className="row" style={{ marginTop: "var(--space-4)" }}>
+        <button
+          type="button"
+          className="btn"
+          disabled={!canAdd || busy}
+          onClick={add}
+        >
+          Anadir a la lista
+        </button>
+        <button
+          type="button"
+          className="btn btn--primary"
+          disabled={!dirty || busy}
+          onClick={() => onSave(draft)}
+        >
+          Guardar
+        </button>
+        {dirty && (
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={() => setDraft(folders)}
+          >
+            Descartar cambios
+          </button>
+        )}
+      </div>
+
+      <div style={{ marginTop: "var(--space-4)" }}>
+        <Notice tone="warn">
+          Un archivo que se suba no sobrescribe uno que ya exista con el mismo
+          nombre: se rechaza y se dice por que. Sobrescribir pedira una
+          confirmacion en este PC, y eso todavia no esta hecho.
+        </Notice>
+      </div>
+    </Card>
   );
 }

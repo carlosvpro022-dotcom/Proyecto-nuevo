@@ -56,6 +56,26 @@ use crate::ice::{IceConfiguration, TransportPolicy};
 pub const CONTROL_CHANNEL: &str = "control";
 /// Canal de raton y teclado.
 pub const INPUT_CHANNEL: &str = "input";
+/// Canal de los bytes de los archivos.
+///
+/// Va aparte del de control por dos razones. Los bytes van en binario, sin
+/// codificar en JSON, que inflaria el tamano un tercio. Y el canal es ordenado
+/// y fiable: una descarga de dos gigas en el canal de control dejaria el raton
+/// congelado detras de ella hasta terminar.
+pub const FILES_CHANNEL: &str = "files";
+
+/// Tope de bytes que un canal puede tener pendientes de salir.
+///
+/// La biblioteca viene con este limite en `usize::MAX`, es decir sin limite: el
+/// envio nunca espera y lo que no quepa en la red se acumula en memoria. Con
+/// ordenes pequenas no se nota, pero al enviar un archivo de varios gigas por
+/// el canal se acumularia el archivo entero en la memoria del host.
+///
+/// Con un tope, `send` espera a que haya sitio en lugar de acumular, lo que
+/// convierte la velocidad de la red en la velocidad a la que se lee del disco.
+/// Cuatro mebibytes son muchos trozos de 64 KiB en vuelo: de sobra para llenar
+/// un enlace rapido sin que la memoria dependa del tamano del archivo.
+pub const SEND_BUFFER_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Eventos que caben en la cola antes de que el consumidor los lea.
 const EVENT_QUEUE_DEPTH: usize = 256;
@@ -358,6 +378,56 @@ impl std::fmt::Debug for PeerSession {
     }
 }
 
+/// Extremo de envio de una conexion, clonable y independiente del bucle de
+/// eventos.
+///
+/// Se obtiene con [`PeerSession::sender`]. Enviar por un canal no necesita
+/// acceso exclusivo a la conexion, asi que varias tareas pueden tener su propio
+/// remitente: el bucle de control por un lado y el envio de archivos por otro.
+#[derive(Clone)]
+pub struct PeerSender {
+    channels: ChannelMap,
+}
+
+impl std::fmt::Debug for PeerSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerSender").finish_non_exhaustive()
+    }
+}
+
+impl PeerSender {
+    /// Envia datos por un canal.
+    ///
+    /// Espera si el canal ya tiene demasiados bytes pendientes de salir (ver
+    /// [`SEND_BUFFER_LIMIT_BYTES`]). Esa espera es la que evita que un archivo
+    /// grande se acumule en memoria: quien lee del disco avanza al ritmo al que
+    /// la red es capaz de vaciar.
+    ///
+    /// # Errors
+    ///
+    /// - [`TransportError::ChannelUnavailable`] si el canal no esta abierto.
+    /// - [`TransportError::Peer`] si el envio falla.
+    pub async fn send(&self, label: &str, data: &[u8]) -> TransportResult<()> {
+        let channel = self
+            .channels
+            .lock()
+            .await
+            .get(label)
+            .map(Arc::clone)
+            .ok_or_else(|| TransportError::ChannelUnavailable(label.to_owned()))?;
+
+        channel
+            .send(BytesMut::from(data))
+            .await
+            .map_err(|e| TransportError::Peer(e.to_string()))
+    }
+
+    /// Indica si un canal esta registrado.
+    pub async fn has_channel(&self, label: &str) -> bool {
+        self.channels.lock().await.contains_key(label)
+    }
+}
+
 impl PeerSession {
     /// Abre una conexion con la configuracion ICE recibida del servidor.
     ///
@@ -446,6 +516,9 @@ impl PeerSession {
             .with_interceptor_registry(registry)
             .with_handler(Arc::new(bridge))
             .with_setting_engine(settings.build())
+            // Sin esto el envio no espera nunca y un archivo grande se
+            // acumularia entero en memoria. Ver SEND_BUFFER_LIMIT_BYTES.
+            .with_data_channel_send_buffer_limit(SEND_BUFFER_LIMIT_BYTES)
             // Escucha en todas las interfaces. El puerto es el que digan las
             // opciones: al azar si sale por un servidor propio, fijo si hay que
             // abrirlo en un router.
@@ -457,7 +530,7 @@ impl PeerSession {
         let connection: Arc<dyn PeerConnection> = Arc::new(connection);
 
         if role == PeerRole::Offerer {
-            for label in [CONTROL_CHANNEL, INPUT_CHANNEL] {
+            for label in [CONTROL_CHANNEL, INPUT_CHANNEL, FILES_CHANNEL] {
                 let channel = connection
                     .create_data_channel(label, Some(reliable_channel()))
                     .await
@@ -594,18 +667,23 @@ impl PeerSession {
     /// - [`TransportError::ChannelUnavailable`] si el canal no esta abierto.
     /// - [`TransportError::Peer`] si el envio falla.
     pub async fn send(&self, label: &str, data: &[u8]) -> TransportResult<()> {
-        let channel = self
-            .channels
-            .lock()
-            .await
-            .get(label)
-            .map(Arc::clone)
-            .ok_or_else(|| TransportError::ChannelUnavailable(label.to_owned()))?;
+        self.sender().send(label, data).await
+    }
 
-        channel
-            .send(BytesMut::from(data))
-            .await
-            .map_err(|e| TransportError::Peer(e.to_string()))
+    /// Devuelve un remitente independiente de esta conexion.
+    ///
+    /// Hace falta porque leer eventos necesita `&mut self` y enviar no: sin
+    /// esto, una tarea que envie archivos y el bucle que atiende las ordenes no
+    /// podrian tener la conexion a la vez.
+    ///
+    /// Y tienen que poder: enviar un archivo de dos gigas desde el mismo bucle
+    /// que mueve el raton significa un raton congelado durante la descarga. El
+    /// remitente se clona y se lleva a su propia tarea.
+    #[must_use]
+    pub fn sender(&self) -> PeerSender {
+        PeerSender {
+            channels: Arc::clone(&self.channels),
+        }
     }
 
     /// Etiquetas de los canales de datos registrados.

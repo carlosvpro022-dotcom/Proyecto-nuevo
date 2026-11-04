@@ -18,11 +18,9 @@
 
 mod comun;
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use comun::{Device, STEP_TIMEOUT, TOKEN, TestServer};
-use nexus_core::monitor::{MonitorInfo, MonitorLayout};
+use comun::{Device, HostDeProducto, STEP_TIMEOUT, TestServer};
 use nexus_core::protocol::Envelope;
 use nexus_core::protocol::control::{ControlMessage, ControlRequest};
 use nexus_core::protocol::input::{InputEvent, KeyState, PointerButton};
@@ -33,103 +31,9 @@ use nexus_security::registry::DeviceRecord;
 use nexus_security::{AuthRole, DeviceIdentity, SessionBinding};
 use nexus_transport::client::SignalingClient;
 use nexus_transport::peer::{INPUT_CHANNEL, PeerEvent, PeerRole, PeerSession};
-use nexus_windows_host::runtime::{
-    HostRuntime, InMemoryLookup, RecordingInjectors, RuntimeConfig, RuntimeEvent,
-};
-use tokio::sync::{mpsc, oneshot};
+use nexus_windows_host::runtime::RuntimeEvent;
 
 const TIMEOUT: Duration = Duration::from_secs(45);
-
-fn layout() -> MonitorLayout {
-    MonitorLayout(vec![MonitorInfo {
-        index: 0,
-        name: "Principal".to_owned(),
-        width: 1_920,
-        height: 1_080,
-        origin_x: 0,
-        origin_y: 0,
-        scale_percent: 100,
-        is_primary: true,
-        refresh_hz: Some(60),
-    }])
-}
-
-/// Un host del producto en marcha, con su registro y su inyector.
-struct HostEnMarcha {
-    eventos: mpsc::Receiver<RuntimeEvent>,
-    inyector: RecordingInjectors,
-    parar: Option<oneshot::Sender<()>>,
-    tarea: tokio::task::JoinHandle<()>,
-    id: DeviceId,
-}
-
-impl HostEnMarcha {
-    /// Arranca el bucle con los dispositivos emparejados que se indiquen.
-    async fn arrancar(server: &TestServer, emparejados: Vec<DeviceRecord>) -> Self {
-        let host = Device::host("PC del salon");
-        let mut registro = InMemoryLookup::new();
-        for record in emparejados {
-            registro.insert(record);
-        }
-
-        let inyector = RecordingInjectors::default();
-        let (tx, eventos) = mpsc::channel(64);
-        let (parar, apagado) = oneshot::channel();
-
-        let runtime = HostRuntime::new(
-            RuntimeConfig {
-                url: server.url.clone(),
-                device: host.info.clone(),
-                enrollment_token: Some(TOKEN.to_owned()),
-                monitors: layout(),
-                udp_port: 0,
-                public_endpoint: None,
-            },
-            host.duplicate_identity(),
-            Arc::new(registro),
-            Arc::new(inyector.clone()),
-            tx,
-        );
-
-        let tarea = tokio::spawn(async move {
-            runtime
-                .run(async {
-                    let _ = apagado.await;
-                })
-                .await;
-        });
-
-        let mut yo = Self {
-            eventos,
-            inyector,
-            parar: Some(parar),
-            tarea,
-            id: host.id(),
-        };
-
-        // Esperar a que se declare disponible antes de devolverlo: si no, el
-        // controlador pediria sesion contra un host que aun no existe.
-        match yo.siguiente_evento().await {
-            RuntimeEvent::Available { has_relay, .. } => assert!(has_relay),
-            otro => panic!("el host deberia declararse disponible, llego {otro:?}"),
-        }
-        yo
-    }
-
-    async fn siguiente_evento(&mut self) -> RuntimeEvent {
-        tokio::time::timeout(STEP_TIMEOUT, self.eventos.recv())
-            .await
-            .expect("el host deberia dar senales de vida")
-            .expect("el canal de eventos sigue abierto")
-    }
-
-    async fn parar(mut self) {
-        if let Some(parar) = self.parar.take() {
-            let _ = parar.send(());
-        }
-        let _ = tokio::time::timeout(STEP_TIMEOUT, self.tarea).await;
-    }
-}
 
 /// Un controlador que conduce su lado de la sesion.
 struct Controlador {
@@ -293,14 +197,16 @@ fn emparejado(device: &Device, permisos: PermissionSet, desatendido: bool) -> De
 async fn un_dispositivo_emparejado_entra_y_mueve_el_raton() {
     let server = TestServer::start().await;
     let ipad = Device::controller("iPad Pro");
-    let mut host = HostEnMarcha::arrancar(
+    let mut host = HostDeProducto::arrancar(
         &server,
         vec![emparejado(&ipad, PermissionSet::standard(), true)],
     )
     .await;
 
     let mut controlador = Controlador::conectar(&server, ipad).await;
-    let respuesta = controlador.pedir(host.id, PermissionSet::standard()).await;
+    let respuesta = controlador
+        .pedir(host.id(), PermissionSet::standard())
+        .await;
 
     let (session_id, permisos) = match respuesta {
         ServerToClient::SessionAccepted {
@@ -319,7 +225,9 @@ async fn un_dispositivo_emparejado_entra_y_mueve_el_raton() {
 
     let identidad = controlador.device.duplicate_identity();
     let enviado = tokio::time::timeout(TIMEOUT, async {
-        controlador.sesionar(session_id, host.id, &identidad).await
+        controlador
+            .sesionar(session_id, host.id(), &identidad)
+            .await
     })
     .await
     .expect("la sesion deberia completarse");
@@ -350,12 +258,12 @@ async fn un_dispositivo_emparejado_entra_y_mueve_el_raton() {
 #[tokio::test(flavor = "multi_thread")]
 async fn un_dispositivo_sin_emparejar_no_entra() {
     let server = TestServer::start().await;
-    let mut host = HostEnMarcha::arrancar(&server, vec![]).await;
+    let mut host = HostDeProducto::arrancar(&server, vec![]).await;
 
     let desconocido = Device::controller("iPhone de un desconocido");
     let mut controlador = Controlador::conectar(&server, desconocido).await;
 
-    match controlador.pedir(host.id, PermissionSet::full()).await {
+    match controlador.pedir(host.id(), PermissionSet::full()).await {
         ServerToClient::SessionRejected { reason, .. } => {
             assert!(
                 !reason.contains("emparejad") && !reason.contains("revocad"),
@@ -380,10 +288,10 @@ async fn un_dispositivo_revocado_se_rechaza_igual_que_uno_desconocido() {
     let mut revocado = emparejado(&ipad, PermissionSet::full(), true);
     revocado.revoked_at = Some(nexus_core::Timestamp::now());
 
-    let host = HostEnMarcha::arrancar(&server, vec![revocado]).await;
+    let host = HostDeProducto::arrancar(&server, vec![revocado]).await;
     let mut controlador = Controlador::conectar(&server, ipad).await;
 
-    match controlador.pedir(host.id, PermissionSet::full()).await {
+    match controlador.pedir(host.id(), PermissionSet::full()).await {
         ServerToClient::SessionRejected { .. } => {}
         otro => panic!("deberia rechazarse, llego {otro:?}"),
     }
@@ -394,14 +302,17 @@ async fn un_dispositivo_revocado_se_rechaza_igual_que_uno_desconocido() {
 async fn sin_acceso_desatendido_el_host_lo_dice_en_lugar_de_dejar_esperando() {
     let server = TestServer::start().await;
     let ipad = Device::controller("iPad sin desatendido");
-    let host = HostEnMarcha::arrancar(
+    let host = HostDeProducto::arrancar(
         &server,
         vec![emparejado(&ipad, PermissionSet::standard(), false)],
     )
     .await;
 
     let mut controlador = Controlador::conectar(&server, ipad).await;
-    match controlador.pedir(host.id, PermissionSet::standard()).await {
+    match controlador
+        .pedir(host.id(), PermissionSet::standard())
+        .await
+    {
         ServerToClient::SessionRejected { reason, .. } => {
             assert!(
                 reason.contains("aceptar la sesion en el PC"),
@@ -417,14 +328,14 @@ async fn sin_acceso_desatendido_el_host_lo_dice_en_lugar_de_dejar_esperando() {
 async fn no_se_concede_mas_de_lo_concedido_aunque_se_pida() {
     let server = TestServer::start().await;
     let ipad = Device::controller("iPad solo mirar");
-    let host = HostEnMarcha::arrancar(
+    let host = HostDeProducto::arrancar(
         &server,
         vec![emparejado(&ipad, PermissionSet::view_only(), true)],
     )
     .await;
 
     let mut controlador = Controlador::conectar(&server, ipad).await;
-    match controlador.pedir(host.id, PermissionSet::full()).await {
+    match controlador.pedir(host.id(), PermissionSet::full()).await {
         ServerToClient::SessionAccepted {
             effective_permissions,
             ..
@@ -449,14 +360,14 @@ async fn nada_toca_el_equipo_si_la_atadura_no_cuadra() {
     // no debe aplicar ni una sola orden.
     let server = TestServer::start().await;
     let ipad = Device::controller("iPad Pro");
-    let mut host = HostEnMarcha::arrancar(
+    let mut host = HostDeProducto::arrancar(
         &server,
         vec![emparejado(&ipad, PermissionSet::full(), true)],
     )
     .await;
 
     let mut controlador = Controlador::conectar(&server, ipad).await;
-    let session_id = match controlador.pedir(host.id, PermissionSet::full()).await {
+    let session_id = match controlador.pedir(host.id(), PermissionSet::full()).await {
         ServerToClient::SessionAccepted { session_id, .. } => session_id,
         otro => panic!("deberia aceptarse, llego {otro:?}"),
     };
@@ -470,7 +381,7 @@ async fn nada_toca_el_equipo_si_la_atadura_no_cuadra() {
     // firma no cuadra, y eso es lo deseable.
     let impostor = DeviceIdentity::generate(controlador.device.id());
     let _ = tokio::time::timeout(TIMEOUT, async {
-        controlador.sesionar(session_id, host.id, &impostor).await
+        controlador.sesionar(session_id, host.id(), &impostor).await
     })
     .await;
 

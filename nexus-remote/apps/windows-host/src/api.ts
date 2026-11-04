@@ -107,6 +107,19 @@ export interface PermissionEntry {
 
 export type PermissionProfile = "view_only" | "standard" | "full";
 
+/**
+ * Una carpeta que este equipo comparte.
+ *
+ * Es una concesion aparte de los permisos de cada dispositivo: un dispositivo
+ * con permiso de archivos no ve nada hasta que aqui haya una carpeta, y solo ve
+ * lo que haya dentro de ella.
+ */
+export interface SharedFolder {
+  label: string;
+  path: string;
+  writable: boolean;
+}
+
 /** Como se expone este equipo a la red. */
 export interface NetworkExposure {
   udp_port: number;
@@ -425,6 +438,20 @@ export const api = {
     publicEndpoint: string | null,
   ): Promise<void> {
     return call<void>("set_network_exposure", { udpPort, publicEndpoint });
+  },
+
+  async sharedFolders(): Promise<SharedFolder[]> {
+    return call<SharedFolder[]>("shared_folders");
+  },
+
+  /**
+   * Guarda la lista entera de carpetas compartidas.
+   *
+   * Guardar una lista vacia deja el equipo sin compartir nada, que es el
+   * estado por omision.
+   */
+  async setSharedFolders(folders: SharedFolder[]): Promise<void> {
+    return call<void>("set_shared_folders", { folders });
   },
 
   async listMonitors(): Promise<MonitorInfo[]> {

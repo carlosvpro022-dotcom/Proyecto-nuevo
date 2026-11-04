@@ -43,6 +43,15 @@ pub const SETTING_UDP_PORT: &str = "udp_port";
 /// Direccion publica que anunciar: una IP o el nombre de un DNS dinamico.
 pub const SETTING_PUBLIC_ENDPOINT: &str = "public_endpoint";
 
+/// Carpetas que el host comparte, guardadas como JSON.
+pub const SETTING_SHARED_ROOTS: &str = "shared_roots";
+
+/// Carpetas compartidas que se admiten como maximo.
+///
+/// No es un limite tecnico: es para que la lista siga siendo algo que una
+/// persona pueda leer de un vistazo y saber que esta exponiendo.
+pub const MAX_SHARED_ROOTS: usize = 8;
+
 /// Emparejamiento abierto, con el codigo en claro para poder mostrarlo.
 ///
 /// El codigo vive aqui, en memoria, solo mientras el emparejamiento esta
@@ -438,6 +447,101 @@ impl HostService {
             .filter(|valor| !valor.trim().is_empty());
 
         Ok((puerto, endpoint))
+    }
+
+    /// Declara las carpetas que este equipo comparte.
+    ///
+    /// Reemplaza la lista entera. Guardar una lista vacia deja el equipo sin
+    /// compartir nada, que es el estado por omision.
+    ///
+    /// Se comprueba cada carpeta antes de guardarla, porque un error aqui se
+    /// paga exponiendo algo que no se queria:
+    ///
+    /// - La ruta tiene que ser absoluta. Una relativa dependeria de desde donde
+    ///   se arranco el programa.
+    /// - Tiene que existir y ser una carpeta.
+    /// - No puede ser la raiz de un disco. Compartir `C:\` entero anula el
+    ///   sentido de tener una lista, y nadie lo elige a proposito.
+    /// - La etiqueta no puede estar vacia: es lo que la persona vera y
+    ///   reconocera en el explorador remoto.
+    ///
+    /// # Errors
+    ///
+    /// - [`HostError::InvalidInput`] si alguna carpeta no cumple lo anterior o
+    ///   si hay mas de [`MAX_SHARED_ROOTS`].
+    /// - [`HostError::Database`] si no se puede guardar.
+    pub fn set_shared_roots(&self, roots: &[nexus_file_transfer::SharedRoot]) -> HostResult<()> {
+        if roots.len() > MAX_SHARED_ROOTS {
+            return Err(HostError::InvalidInput(format!(
+                "no se pueden compartir mas de {MAX_SHARED_ROOTS} carpetas"
+            )));
+        }
+
+        let mut limpias = Vec::with_capacity(roots.len());
+        for root in roots {
+            let etiqueta = nexus_core::text::sanitize_line(&root.label, 64, "");
+            if etiqueta.is_empty() {
+                return Err(HostError::InvalidInput(
+                    "cada carpeta compartida necesita un nombre".to_owned(),
+                ));
+            }
+            if !root.path.is_absolute() {
+                return Err(HostError::InvalidInput(format!(
+                    "la ruta de «{etiqueta}» tiene que ser absoluta"
+                )));
+            }
+            let metadata = std::fs::metadata(&root.path).map_err(|error| {
+                HostError::InvalidInput(format!(
+                    "la carpeta de «{etiqueta}» no se puede leer: {error}"
+                ))
+            })?;
+            if !metadata.is_dir() {
+                return Err(HostError::InvalidInput(format!(
+                    "«{etiqueta}» no es una carpeta"
+                )));
+            }
+            if root.path.parent().is_none() {
+                return Err(HostError::InvalidInput(
+                    "no se puede compartir la raiz de un disco: elige una carpeta concreta"
+                        .to_owned(),
+                ));
+            }
+
+            limpias.push(nexus_file_transfer::SharedRoot {
+                label: etiqueta,
+                path: root.path.clone(),
+                writable: root.writable,
+            });
+        }
+
+        let json = serde_json::to_string(&limpias)
+            .map_err(|error| HostError::InvalidInput(error.to_string()))?;
+        self.store.set_setting(SETTING_SHARED_ROOTS, &json)
+    }
+
+    /// Carpetas que este equipo comparte.
+    ///
+    /// Devuelve una lista vacia cuando no hay nada configurado, y tambien
+    /// cuando lo guardado no se puede interpretar: ante la duda, no se comparte
+    /// nada. Un ajuste corrupto no debe poder abrir el disco.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Database`] si la lectura falla.
+    pub fn shared_roots(&self) -> HostResult<Vec<nexus_file_transfer::SharedRoot>> {
+        let Some(json) = self.store.get_setting(SETTING_SHARED_ROOTS)? else {
+            return Ok(Vec::new());
+        };
+        match serde_json::from_str(&json) {
+            Ok(roots) => Ok(roots),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "el ajuste de carpetas compartidas no se pudo interpretar; no se comparte nada"
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// URL del servidor de senalizacion, si esta configurada.

@@ -29,6 +29,7 @@
 pub mod admission;
 pub mod commands;
 pub mod error;
+pub mod files;
 pub mod host;
 pub mod identity;
 pub mod runtime;
@@ -95,6 +96,8 @@ pub fn run() {
             commands::session_history,
             commands::set_network_exposure,
             commands::network_exposure,
+            commands::set_shared_folders,
+            commands::shared_folders,
             commands::feature_matrix,
             commands::permission_catalog,
         ])

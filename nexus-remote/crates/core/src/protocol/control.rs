@@ -140,9 +140,17 @@ pub enum ControlRequest {
         text: String,
     },
     /// Lista un directorio del host.
+    ///
+    /// El listado se pagina: una carpeta de descargas con miles de archivos no
+    /// cabe en un mensaje del canal de control, y truncarla dejaria el resto
+    /// inalcanzable. Quien pregunta avanza con `offset` hasta que la respuesta
+    /// diga que no queda mas.
     ListDir {
         /// Ruta absoluta dentro de las raices permitidas.
         path: String,
+        /// Entradas a saltar, dentro del orden completo de la carpeta.
+        #[serde(default)]
+        offset: u64,
     },
     /// Empieza una descarga desde el host.
     DownloadStart {
@@ -253,12 +261,26 @@ pub enum ControlResponse {
         /// Texto leido.
         text: String,
     },
-    /// Listado de un directorio.
+    /// Listado de un directorio, una pagina a la vez.
     DirListing {
         /// Ruta consultada, ya normalizada por el host.
         path: String,
-        /// Entradas encontradas.
+        /// Entradas de esta pagina, ordenadas: carpetas primero, luego nombre.
         entries: Vec<DirEntry>,
+        /// Posicion de la primera entrada dentro del orden completo.
+        #[serde(default)]
+        offset: u64,
+        /// Entradas que tiene la carpeta en total.
+        ///
+        /// Quien pregunta sabe que falta mas cuando `offset + entries.len()`
+        /// se queda por debajo de este numero.
+        total_entries: u64,
+        /// Si la carpeta es tan grande que el host no la recorrio entera.
+        ///
+        /// Se dice en lugar de esconderlo: un listado incompleto que parece
+        /// completo es peor que uno que avisa.
+        #[serde(default)]
+        scan_truncated: bool,
     },
     /// Transferencia aceptada.
     TransferAccepted {
@@ -385,7 +407,11 @@ mod tests {
     #[test]
     fn upload_needs_write_while_listing_needs_read() {
         assert_eq!(
-            ControlRequest::ListDir { path: "C:/".into() }.required_permission(),
+            ControlRequest::ListDir {
+                path: "C:/".into(),
+                offset: 0,
+            }
+            .required_permission(),
             Permission::FileRead
         );
         assert_eq!(
@@ -478,7 +504,10 @@ mod tests {
             },
             ControlRequest::ClipboardGet,
             ControlRequest::ClipboardSet { text: "a".into() },
-            ControlRequest::ListDir { path: "C:/".into() },
+            ControlRequest::ListDir {
+                path: "C:/".into(),
+                offset: 0,
+            },
             ControlRequest::DownloadStart {
                 path: "C:/a".into(),
             },
@@ -520,6 +549,9 @@ mod tests {
                     modified_at: Some(Timestamp(1)),
                     hidden: false,
                 }],
+                offset: 0,
+                total_entries: 1,
+                scan_truncated: false,
             }),
             ControlMessage::Event(HostEvent::TransferProgress {
                 transfer_id: TransferId::new(),

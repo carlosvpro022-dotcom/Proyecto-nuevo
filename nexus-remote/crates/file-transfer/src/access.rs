@@ -172,7 +172,16 @@ impl AccessPolicy {
         let (existing, remainder) = split_at_existing_ancestor(requested);
         let canonical_existing =
             std::fs::canonicalize(&existing).map_err(|e| map_io(&e, &existing))?;
-        let resolved = canonical_existing.join(&remainder);
+        // `join` con una ruta vacia anade un separador al final, y
+        // `/carpeta/archivo.txt/` no se puede abrir: el sistema responde que no
+        // es un directorio. La ruta que sale de aqui se usa para abrir archivos
+        // de verdad, asi que tiene que quedar tal cual cuando ya existia
+        // entera.
+        let resolved = if remainder.as_os_str().is_empty() {
+            canonical_existing
+        } else {
+            canonical_existing.join(&remainder)
+        };
 
         let matched = self
             .roots
@@ -393,6 +402,40 @@ mod tests {
         f.policy
             .resolve(&f.read_root.join("alias/dato.txt"), Access::Read)
             .expect("un enlace interno si vale");
+    }
+
+    #[test]
+    fn a_resolved_path_can_actually_be_opened() {
+        // La razon de ser de esta prueba: `join` con un resto vacio deja la
+        // ruta en `archivo.txt/`, que parece correcta al compararla por
+        // componentes y falla al abrirla con "no es un directorio".
+        let f = fixture();
+        let resolved = f
+            .policy
+            .resolve(&f.read_root.join("informe.txt"), Access::Read)
+            .expect("deberia permitirse");
+
+        assert!(
+            !resolved.to_string_lossy().ends_with('/'),
+            "la ruta resuelta no debe acabar en separador: {}",
+            resolved.display()
+        );
+        let metadata = fs::metadata(&resolved).expect("la ruta resuelta tiene que poder abrirse");
+        assert!(metadata.is_file());
+        assert_eq!(fs::read(&resolved).expect("lee"), b"contenido");
+    }
+
+    #[test]
+    fn a_resolved_directory_can_be_read_as_a_directory() {
+        let f = fixture();
+        let resolved = f
+            .policy
+            .resolve(&f.read_root, Access::Read)
+            .expect("deberia permitirse");
+        assert!(
+            fs::metadata(&resolved).expect("abre").is_dir(),
+            "una carpeta compartida tiene que resolverse como carpeta"
+        );
     }
 
     #[test]

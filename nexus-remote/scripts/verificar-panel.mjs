@@ -67,7 +67,7 @@ const VIEWS = [
   { id: "devices", nav: "Mis dispositivos", expect: "Dispositivos autorizados" },
   { id: "pairing", nav: "Conexion remota", expect: "Codigo de emparejamiento activo" },
   { id: "desktop", nav: "Escritorio remoto", expect: "Motor de escritorio remoto" },
-  { id: "files", nav: "Archivos", expect: "Transferencia de archivos" },
+  { id: "files", nav: "Archivos", expect: "Carpetas que se comparten ahora mismo" },
   { id: "history", nav: "Historial", expect: "Historial de sesiones" },
   { id: "security", nav: "Seguridad", expect: "Medidas implementadas" },
   { id: "settings", nav: "Configuracion", expect: "Servidor de senalizacion" },

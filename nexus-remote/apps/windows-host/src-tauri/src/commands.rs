@@ -465,9 +465,13 @@ fn comunicacion() -> Vec<FeatureStatus> {
     ]
 }
 
-/// Etapa 5: funciones que faltan por implementar.
+/// Etapa 5: las funciones de la sesion mas alla del escritorio.
+///
+/// Ya no estan todas pendientes: la transferencia de archivos funciona y se
+/// prueba moviendo archivos de verdad por el canal cifrado. Las demas siguen
+/// esperando.
 fn funciones_avanzadas() -> Vec<FeatureStatus> {
-    use FeatureState::Pending;
+    use FeatureState::{Pending, Working};
 
     vec![
         FeatureStatus {
@@ -487,9 +491,13 @@ fn funciones_avanzadas() -> Vec<FeatureStatus> {
         FeatureStatus {
             key: "files",
             label: "Transferencia de archivos",
-            state: Pending,
+            // Se ejecuta de verdad: una prueba mueve un archivo de varios
+            // trozos por un canal WebRTC cifrado real y comprueba que llega
+            // identico. Lo unico sin ejecutar en Windows es la lectura del
+            // atributo de archivo oculto.
+            state: Working,
             stage: 5,
-            detail: "Restriccion de acceso y contabilidad listas; falta mover bytes por el canal de datos.",
+            detail: "Listar, descargar y subir funcionan, con el contenido verificado por SHA-256; falta un cliente que lo use y falta sobrescribir con confirmacion.",
         },
         FeatureStatus {
             key: "clipboard",
@@ -614,6 +622,7 @@ pub fn start_host(
                 monitors,
                 udp_port,
                 public_endpoint,
+                shared_roots: host.shared_roots()?,
             },
             host.duplicate_identity()?,
         ))
@@ -724,6 +733,65 @@ pub fn network_exposure(state: tauri::State<'_, AppState>) -> CmdResult<NetworkE
             udp_port,
             public_endpoint,
         })
+    })
+}
+
+/// Una carpeta compartida tal como la ve y la edita el panel.
+#[derive(Debug, Serialize, serde::Deserialize)]
+pub struct SharedFolder {
+    /// Nombre que vera quien se conecte.
+    pub label: String,
+    /// Ruta en este equipo.
+    pub path: String,
+    /// Si se permite escribir dentro, no solo leer.
+    pub writable: bool,
+}
+
+/// Guarda las carpetas que este equipo comparte.
+///
+/// Reemplaza la lista entera; una lista vacia deja el equipo sin compartir
+/// nada. Es una concesion aparte de los permisos de cada dispositivo: un
+/// dispositivo con permiso de archivos no ve nada hasta que aqui haya una
+/// carpeta, y solo ve lo que haya en ella.
+///
+/// # Errors
+///
+/// - [`HostError::InvalidInput`] si alguna carpeta no existe, no es absoluta,
+///   es la raiz de un disco o no tiene nombre.
+/// - [`HostError::Database`] si la escritura falla.
+#[tauri::command]
+pub fn set_shared_folders(
+    state: tauri::State<'_, AppState>,
+    folders: Vec<SharedFolder>,
+) -> CmdResult<()> {
+    let roots: Vec<nexus_file_transfer::SharedRoot> = folders
+        .into_iter()
+        .map(|folder| nexus_file_transfer::SharedRoot {
+            label: folder.label,
+            path: std::path::PathBuf::from(folder.path),
+            writable: folder.writable,
+        })
+        .collect();
+    with_host(&state, |host| host.set_shared_roots(&roots))
+}
+
+/// Lee las carpetas que este equipo comparte.
+///
+/// # Errors
+///
+/// [`HostError::Database`] si la lectura falla.
+#[tauri::command]
+pub fn shared_folders(state: tauri::State<'_, AppState>) -> CmdResult<Vec<SharedFolder>> {
+    with_host(&state, |host| {
+        Ok(host
+            .shared_roots()?
+            .into_iter()
+            .map(|root| SharedFolder {
+                label: root.label,
+                path: root.path.to_string_lossy().into_owned(),
+                writable: root.writable,
+            })
+            .collect())
     })
 }
 

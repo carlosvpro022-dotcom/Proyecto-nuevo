@@ -24,6 +24,7 @@ entorno real**, y lo que todavía no existe.
 | **Lista de autorizados** | SQLite con permisos por dispositivo, revocación, borrado e historial de sesiones. |
 | **Límite de intentos** | Bloqueo progresivo por dispositivo. Esperar a que expire no reinicia la escalada. |
 | **Restricción de acceso al disco** | Solo las carpetas declaradas. Rechaza recorrido de directorios, enlaces que escapan y nombres reservados de Windows. |
+| **Transferencia de archivos** | Listar, descargar y subir, por un canal binario propio. Un archivo subido se escribe aparte y solo aparece en su ruta cuando su contenido coincide con su `SHA-256`: si la sesión se corta, no queda nada a medias. Comprobado moviendo un archivo de varios trozos por un canal WebRTC real y verificando que llega idéntico ([ADR-0012](docs/architecture/ADR-0012-transferencia-de-archivos.md)). |
 | **Servidor de señalización** | `/v1/signaling` completo: autenticación Ed25519 del dispositivo, directorio de identidades con testigo de alta, límite de intentos por dispositivo y por origen, enrutado entre los dos extremos, registro de conexiones. |
 | **Conexión cifrada entre dispositivos** | WebRTC de verdad: ICE encuentra camino, DTLS cifra y los canales `control` e `input` transportan órdenes. Comprobado de extremo a extremo: un toque enviado por un par llega al otro y se aplica. |
 | **El host atiende sesiones** | Se conecta solo, decide cada petición contra su registro local, comprueba quién hay al otro lado y sirve el canal de control. Reintenta con espera creciente si el enlace se cae. **No aplica ni una orden antes de autenticar al otro extremo.** |
@@ -66,7 +67,7 @@ Hace falta desplegar el servidor.
 | Emparejar desde fuera de la red local | 3 | El servidor lo rechaza a propósito: el código tiene unos 40 bits y viajaría en claro por él. Falta enviar un verificador Argon2id y confirmar la huella en el host ([ADR-0010](docs/architecture/ADR-0010-emparejamiento-por-red.md)). Mientras, se empareja en la red local. |
 | Cliente de iPhone y iPad | 4 | El proyecto entero. **Hace falta un Mac con Xcode.** |
 | Transmisión de la pantalla | 5 | La captura existe y la conexión existe; falta codificar los fotogramas y enviarlos por una pista de medios. |
-| Audio, archivos, portapapeles, administración | 5 | Las llamadas al sistema. Protocolo, permisos y contabilidad están listos. |
+| Audio, portapapeles, administración | 5 | Las llamadas al sistema. Protocolo, permisos y contabilidad están listos. |
 | Cifrado de la clave del host con DPAPI | 6 | Hoy la clave privada está en un archivo sin cifrar. |
 
 El panel refleja esta misma distinción con tres estados —*Probado*, *Sin

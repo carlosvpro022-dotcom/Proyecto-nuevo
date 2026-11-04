@@ -22,6 +22,7 @@ import {
   type PermissionEntry,
   type PermissionProfile,
   type NetworkExposure,
+  type SharedFolder,
   type RuntimeStatus,
   type SessionRow,
   type SignalingProbe,
@@ -109,6 +110,7 @@ export function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [exposure, setExposure] = useState<NetworkExposure | null>(null);
+  const [folders, setFolders] = useState<SharedFolder[]>([]);
 
   const reload = useCallback(async () => {
     try {
@@ -123,6 +125,7 @@ export function App() {
         runtimeStatus,
         history,
         network,
+        shared,
       ] = await Promise.all([
         api.hostSummary(),
         api.systemStatus(),
@@ -134,10 +137,12 @@ export function App() {
         api.runtimeStatus(),
         api.sessionHistory(),
         api.networkExposure(),
+        api.sharedFolders(),
       ]);
       setRuntime(runtimeStatus);
       setSessions(history);
       setExposure(network);
+      setFolders(shared);
 
       // La enumeracion de monitores falla a proposito en las plataformas sin
       // backend. No es motivo para dejar el panel sin datos: se guarda el
@@ -225,7 +230,16 @@ export function App() {
       ready: false,
       ...(data.monitors.length > 0 ? { badge: String(data.monitors.length) } : { badge: "E2" }),
     },
-    { id: "files", label: "Archivos", icon: "files", ready: false, badge: "E5" },
+    {
+      id: "files",
+      label: "Archivos",
+      icon: "files",
+      // El motor funciona; lo que falta es el cliente desde el que usarlo. La
+      // insignia cuenta las carpetas compartidas, que es lo que de verdad hay
+      // que vigilar: dice a cuanto disco se puede llegar ahora mismo.
+      ready: true,
+      ...(folders.length > 0 ? { badge: String(folders.length) } : {}),
+    },
     {
       id: "history",
       label: "Historial",
@@ -329,7 +343,7 @@ export function App() {
           monitorsError={data.monitorsError}
         />
       )}
-      {view === "files" && <Files features={data.features} />}
+      {view === "files" && <Files features={data.features} folders={folders} />}
       {view === "history" && <History sessions={sessions} />}
 
       {view === "security" && <Security devices={data.devices} catalog={data.catalog} />}
@@ -341,10 +355,14 @@ export function App() {
           error={actionError}
           probe={probe}
           exposure={exposure}
+          folders={folders}
           checking={checking}
           onSaveSignalingUrl={(url) => void run(() => api.setSignalingUrl(url))}
           onSaveNetwork={(udpPort, publicEndpoint) =>
             void run(() => api.setNetworkExposure(udpPort, publicEndpoint))
+          }
+          onSaveSharedFolders={(next) =>
+            void run(() => api.setSharedFolders(next))
           }
           onCheckSignaling={(token) => {
             setChecking(true);

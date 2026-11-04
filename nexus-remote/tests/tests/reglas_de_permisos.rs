@@ -42,6 +42,7 @@ fn todas_las_operaciones() -> Vec<ControlRequest> {
         ControlRequest::ClipboardSet { text: "x".into() },
         ControlRequest::ListDir {
             path: "C:/Compartido".into(),
+            offset: 0,
         },
         ControlRequest::DownloadStart {
             path: "C:/Compartido/a.txt".into(),
@@ -111,7 +112,10 @@ fn el_perfil_estandar_controla_pero_no_administra() {
         },
         ControlRequest::ClipboardGet,
         ControlRequest::ClipboardSet { text: "a".into() },
-        ControlRequest::ListDir { path: "C:/".into() },
+        ControlRequest::ListDir {
+            path: "C:/".into(),
+            offset: 0,
+        },
         ControlRequest::SetAudioEnabled { enabled: true },
     ] {
         assert!(
@@ -209,7 +213,10 @@ fn leer_y_escribir_archivos_son_permisos_separados() {
 
     assert!(permitido(
         &solo_lectura,
-        &ControlRequest::ListDir { path: "C:/".into() }
+        &ControlRequest::ListDir {
+            path: "C:/".into(),
+            offset: 0
+        }
     ));
     assert!(permitido(
         &solo_lectura,

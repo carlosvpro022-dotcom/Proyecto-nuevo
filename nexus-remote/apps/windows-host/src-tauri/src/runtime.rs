@@ -33,18 +33,20 @@ use nexus_core::protocol::signaling::{ClientToServer, ServerToClient};
 use nexus_core::{
     CapabilitySet, CloseReason, DeviceId, DeviceInfo, PermissionSet, SessionId, Timestamp,
 };
+use nexus_file_transfer::{AccessPolicy, Frame, SharedRoot};
 use nexus_input::InputInjector;
 use nexus_security::registry::DeviceRecord;
 use nexus_security::{AuthRole, BindingProof, DeviceIdentity, DevicePublicKey, SessionBinding};
 use nexus_transport::client::{ConnectRequest, SignalingClient};
 use nexus_transport::peer::{
-    CONTROL_CHANNEL, INPUT_CHANNEL, LinkPhase, NetworkOptions, PeerEvent, PeerRole, PeerSession,
-    resolve_public_ip,
+    CONTROL_CHANNEL, FILES_CHANNEL, INPUT_CHANNEL, LinkPhase, NetworkOptions, PeerEvent, PeerRole,
+    PeerSender, PeerSession, resolve_public_ip,
 };
 use nexus_transport::{LinkEvent, LinkState, SignalingLink, TransportError};
 use tokio::sync::mpsc;
 
 use crate::admission::{self, Decision};
+use crate::files::{Download, TransferOutcome, TransferReport};
 use crate::session::SessionHandler;
 
 /// Datos con los que arranca el bucle.
@@ -68,6 +70,12 @@ pub struct RuntimeConfig {
     /// Se resuelve **al abrir cada sesion**, de modo que un cambio de IP
     /// domestica se recoge solo en la siguiente conexion.
     pub public_endpoint: Option<String>,
+    /// Carpetas que este host comparte, y con que acceso.
+    ///
+    /// Vacio por omision: el permiso de archivos de un dispositivo no sirve de
+    /// nada hasta que aqui haya una carpeta. Son dos concesiones separadas a
+    /// proposito, y la de aqui la da el dueno del PC.
+    pub shared_roots: Vec<SharedRoot>,
 }
 
 /// Acceso al registro local de dispositivos emparejados.
@@ -156,6 +164,13 @@ pub enum RuntimeOutcome {
 /// Si en ese tiempo no se ha comprobado la atadura, la sesion se cierra: un
 /// extremo que no firma es un extremo con el que no hay que hablar.
 pub const BINDING_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Informes de progreso que caben en la cola antes de empezar a perderlos.
+///
+/// Los intermedios se pueden perder sin consecuencia porque llevan el total
+/// enviado y no el incremento: lo unico que se nota es que la barra avanza a
+/// saltos. El informe final no se pierde nunca, porque ese si espera sitio.
+const REPORT_QUEUE_DEPTH: usize = 64;
 
 /// El bucle del host.
 pub struct HostRuntime {
@@ -422,6 +437,12 @@ impl HostRuntime {
 
         let mut estado = SessionState::new(session_id, controller.id, self.identity.device_id());
         let mut handler: Option<SessionHandler> = None;
+        // Por aqui cuentan las tareas de envio lo que van sacando. Tiene cola
+        // porque son varias y el bucle puede estar ocupado; si se llenara, el
+        // informe se pierde y la barra de progreso se queda corta, que es un
+        // precio aceptable por no frenar el envio.
+        let (reportes, mut recibe_reportes) = mpsc::channel::<TransferReport>(REPORT_QUEUE_DEPTH);
+        let mut envios = tokio::task::JoinSet::new();
         let limite = tokio::time::sleep(BINDING_TIMEOUT);
         tokio::pin!(limite);
 
@@ -470,7 +491,15 @@ impl HostRuntime {
                         break fin;
                     }
                 }
+                Some(reporte) = recibe_reportes.recv() => {
+                    anunciar_progreso(&peer, handler.as_mut(), &reporte).await;
+                }
             }
+
+            // Las descargas que el manejador acepto salen en su propia tarea:
+            // enviar un archivo grande desde este bucle dejaria el raton
+            // congelado hasta terminar.
+            arrancar_descargas(&peer, handler.as_mut(), &reportes, &mut envios);
 
             // La atadura se comprueba en cuanto se tienen las dos piezas, y es
             // lo unico que da paso al manejador.
@@ -483,11 +512,14 @@ impl HostRuntime {
                         "la atadura de sesion no cuadra: posible interceptacion",
                     );
                 }
-                handler = Some(SessionHandler::new(
-                    permissions.clone(),
-                    self.config.monitors.clone(),
-                    self.injectors.create(),
-                ));
+                handler = Some(
+                    SessionHandler::new(
+                        permissions.clone(),
+                        self.config.monitors.clone(),
+                        self.injectors.create(),
+                    )
+                    .with_shared_folders(AccessPolicy::new(self.config.shared_roots.clone())),
+                );
                 self.emit(RuntimeEvent::SessionStarted {
                     session_id,
                     controller: controller.id,
@@ -496,6 +528,14 @@ impl HostRuntime {
                 .await;
             }
         };
+
+        // Primero las transferencias: las subidas a medias tienen que borrar
+        // su archivo temporal antes de que la sesion desaparezca, y las tareas
+        // de envio tienen que parar antes de cerrar la conexion.
+        if let Some(handler) = handler.as_mut() {
+            handler.end();
+        }
+        envios.shutdown().await;
 
         let counts = recuento(handler.as_ref());
         self.end_session(session_id, estado.dropped, counts, motivo)
@@ -584,6 +624,21 @@ impl HostRuntime {
                     return Ok(None);
                 };
 
+                // El canal de archivos lleva binario, no texto: se atiende
+                // antes de intentar interpretarlo como UTF-8.
+                if label == FILES_CHANNEL {
+                    match handler.handle_file_frame(&data) {
+                        Ok(Some(respuesta)) => {
+                            peer.send(CONTROL_CHANNEL, respuesta.as_bytes()).await?;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::error!(%error, "fallo al atender un marco de archivo");
+                        }
+                    }
+                    return Ok(None);
+                }
+
                 if label != INPUT_CHANNEL && label != CONTROL_CHANNEL {
                     tracing::warn!(canal = %label, "canal desconocido");
                     return Ok(None);
@@ -661,6 +716,157 @@ impl HostRuntime {
 type Motivo = (CloseReason, &'static str);
 
 /// Ordenes aplicadas y rechazadas, o ceros si la sesion nunca llego a abrirse.
+/// Envia por el canal de control el progreso que cuente una tarea de envio.
+async fn anunciar_progreso(
+    peer: &PeerSession,
+    handler: Option<&mut SessionHandler>,
+    reporte: &TransferReport,
+) {
+    let Some(handler) = handler else { return };
+    let evento = match handler.handle_transfer_report(reporte) {
+        Ok(Some(evento)) => evento,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(%error, "no se pudo codificar un progreso");
+            return;
+        }
+    };
+    if let Err(error) = peer.send(CONTROL_CHANNEL, evento.as_bytes()).await {
+        tracing::warn!(%error, "no se pudo enviar el progreso de una transferencia");
+    }
+}
+
+/// Pone en marcha las descargas que el manejador dejo aceptadas.
+fn arrancar_descargas(
+    peer: &PeerSession,
+    handler: Option<&mut SessionHandler>,
+    reportes: &mpsc::Sender<TransferReport>,
+    envios: &mut tokio::task::JoinSet<()>,
+) {
+    let Some(handler) = handler else { return };
+    while let Some(descarga) = handler.take_pending_download() {
+        envios.spawn(enviar_archivo(descarga, peer.sender(), reportes.clone()));
+    }
+}
+
+/// Envia un archivo por el canal de archivos, trozo a trozo.
+///
+/// Corre en su propia tarea por una razon concreta: enviar dos gigabytes desde
+/// el bucle que atiende el raton dejaria el raton congelado hasta terminar.
+///
+/// La velocidad la marca la red, no este bucle. `PeerSender::send` espera
+/// cuando el canal tiene demasiados bytes pendientes de salir, asi que leer del
+/// disco avanza al ritmo al que la red es capaz de vaciar: la memoria que usa
+/// una descarga no depende del tamano del archivo.
+async fn enviar_archivo(
+    descarga: Download,
+    envia: PeerSender,
+    reportes: mpsc::Sender<TransferReport>,
+) {
+    let Download {
+        transfer_id,
+        reader,
+        cancelled,
+        ..
+    } = descarga;
+    let mut lector = reader;
+    let mut enviados = 0_u64;
+
+    loop {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = reportes
+                .send(TransferReport {
+                    transfer_id,
+                    sent_bytes: enviados,
+                    outcome: Some(TransferOutcome::Cancelled),
+                })
+                .await;
+            return;
+        }
+
+        // Leer del disco bloquea el hilo. En un ejecutor asincrono eso frena
+        // todo lo demas que ese hilo tuviera entre manos, asi que la lectura se
+        // hace en el grupo de hilos que existe para eso. El lector va y vuelve
+        // porque no se puede prestar a otro hilo.
+        let resultado = tokio::task::spawn_blocking(move || {
+            let siguiente = lector.next_frame();
+            (siguiente, lector)
+        })
+        .await;
+
+        let (siguiente, devuelto) = match resultado {
+            Ok(par) => par,
+            Err(error) => {
+                let _ = reportes
+                    .send(TransferReport {
+                        transfer_id,
+                        sent_bytes: enviados,
+                        outcome: Some(TransferOutcome::Failed(error.to_string())),
+                    })
+                    .await;
+                return;
+            }
+        };
+        lector = devuelto;
+
+        let marco = match siguiente {
+            Ok(Some(marco)) => marco,
+            // El marco de fin ya salio en la vuelta anterior, junto con su
+            // informe: aqui no queda nada que decir.
+            Ok(None) => return,
+            Err(error) => {
+                let _ = reportes
+                    .send(TransferReport {
+                        transfer_id,
+                        sent_bytes: enviados,
+                        outcome: Some(TransferOutcome::Failed(error.to_string())),
+                    })
+                    .await;
+                return;
+            }
+        };
+
+        let (es_final, bytes) = match &marco {
+            Frame::Data { payload, .. } => (false, payload.len() as u64),
+            Frame::End { .. } | Frame::Abort { .. } => (true, 0),
+        };
+
+        if let Err(error) = envia.send(FILES_CHANNEL, &marco.encode()).await {
+            let _ = reportes
+                .send(TransferReport {
+                    transfer_id,
+                    sent_bytes: enviados,
+                    outcome: Some(TransferOutcome::Failed(error.to_string())),
+                })
+                .await;
+            return;
+        }
+        enviados = enviados.saturating_add(bytes);
+
+        if es_final {
+            // El final si espera sitio en la cola: perderlo dejaria la
+            // transferencia marcada como activa para siempre.
+            let _ = reportes
+                .send(TransferReport {
+                    transfer_id,
+                    sent_bytes: enviados,
+                    outcome: Some(TransferOutcome::Completed),
+                })
+                .await;
+            return;
+        }
+
+        // El progreso intermedio no espera: si la cola esta llena, mas vale
+        // perder una actualizacion de la barra que frenar el envio. Por eso el
+        // informe lleva el total y no el incremento.
+        let _ = reportes.try_send(TransferReport {
+            transfer_id,
+            sent_bytes: enviados,
+            outcome: None,
+        });
+    }
+}
+
 fn recuento(handler: Option<&SessionHandler>) -> (u64, u64) {
     handler.map_or((0, 0), |h| (h.applied(), h.refused()))
 }

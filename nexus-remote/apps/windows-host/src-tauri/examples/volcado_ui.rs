@@ -65,6 +65,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (session, code) = host.open_pairing(PermissionSet::standard(), false, now)?;
     let invite = host.current_invite(now)?;
 
+    // Dos carpetas compartidas de verdad, para que la pantalla de archivos se
+    // dibuje con datos y no con el caso vacio. Se crean en la carpeta temporal
+    // del sistema porque `set_shared_roots` comprueba que existan: el volcado
+    // no puede inventarse rutas que el host rechazaria.
+    let base = std::env::temp_dir().join("nexus-volcado-ui");
+    let lectura = base.join("Documentos");
+    let escritura = base.join("Intercambio");
+    for dir in [&lectura, &escritura] {
+        std::fs::create_dir_all(dir)?;
+    }
+    host.set_shared_roots(&[
+        nexus_file_transfer::SharedRoot::read_only("Documentos", &lectura),
+        nexus_file_transfer::SharedRoot::writable("Intercambio", &escritura),
+    ])?;
+
     let devices: Vec<_> = host.list_devices()?.into_iter().map(to_summary).collect();
     let summary = build_host_summary(&mut host)?;
 
@@ -86,6 +101,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "udp_port": host.network_exposure()?.0,
             "public_endpoint": host.network_exposure()?.1,
         },
+        "shared_folders": host
+            .shared_roots()?
+            .into_iter()
+            .map(|root| {
+                serde_json::json!({
+                    "label": root.label,
+                    "path": root.path.to_string_lossy(),
+                    "writable": root.writable,
+                })
+            })
+            .collect::<Vec<_>>(),
         "current_pairing": {
             "pairing_id": session.id.to_string(),
             "code": code.grouped(),
