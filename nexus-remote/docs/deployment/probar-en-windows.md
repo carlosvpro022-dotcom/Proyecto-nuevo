@@ -8,7 +8,9 @@ sesión convierte en verificado.
 El orden importa: cada paso depende del anterior. Si uno falla, los siguientes
 no dicen nada útil.
 
-**No hace falta servidor ni router para los pasos 1 a 5.** Son el PC solo.
+**No hace falta servidor ni router para los pasos 1 a 4.** Son el PC solo.
+
+**Y el paso 1 es casi todo.** Si solo va a hacer uno, haga ese.
 
 ---
 
@@ -25,64 +27,72 @@ Luego:
 
 ```powershell
 git clone https://github.com/carlosvpro022-dotcom/Proyecto-nuevo
-cd Proyecto-nuevo\nexus-remote\apps\windows-host
+cd Proyecto-nuevo\nexus-remote
+```
+
+---
+
+## 1. El informe: un comando
+
+```powershell
+cargo run -p nexus-windows-host --example diagnostico
+```
+
+La primera compilación tarda bastante: está compilando WebRTC entero. Después
+escribe un informe en la consola. **Cópielo entero y mándemelo**: con eso solo,
+casi todo lo que había que comprobar queda comprobado.
+
+Este comando **no toca nada**. No escribe en el disco, no abre el portapapeles,
+no apaga nada y no se conecta a ningún servidor: solo mira y cuenta.
+
+Va primero, y no la interfaz, por un motivo: el panel es una aplicación Tauri,
+y si falla al compilar o al arrancar, la información que haría falta para
+arreglarlo se queda dentro. Esto es un programa de consola normal.
+
+### Qué debería decir
+
+| Línea | Debería decir | Si dice otra cosa |
+| --- | --- | --- |
+| **Captura de pantalla** | `OK ... N pantalla(s)` | Mándeme el mensaje: la enumeración usa cuatro llamadas distintas y el mensaje dice cuál falló |
+| **Ratón y teclado** | `OK ... backend windows-sendinput` | Mándeme el mensaje |
+| **Portapapeles** | `OK ... responde` | Mándeme el mensaje |
+| **Apagar y reiniciar** | `OK ... esta cuenta puede apagar` | Si dice que no tiene permiso, es una cuenta limitada: anótelo, no es un fallo del programa |
+| **Cifrado de la clave** | `OK ... almacen windows-dpapi` | Si dice que quedaría sin cifrar, eso sí es un fallo |
+
+Y debajo, el detalle de **cada pantalla**. Compruebe que cuadra con la realidad,
+sobre todo:
+
+- Si tiene **más de un monitor**, que estén todos y en la posición correcta.
+- Si usa **escalado** (125 %, 150 %…), que lo diga bien. Esto importa de verdad:
+  las coordenadas del ratón se calculan con ese número, y si está mal, el cursor
+  irá a un sitio distinto del que usted toque en el iPad.
+
+> **Lo que esto no comprueba:** que la captura entregue fotogramas de verdad y
+> que `SendInput` mueva el ratón de verdad. Para eso hacen falta los dos
+> extremos, y eso es la etapa 4.
+
+---
+
+## 2. El panel
+
+```powershell
+cd apps\windows-host
 npm install
 npm run tauri dev
 ```
 
-La primera compilación tarda bastante: está compilando WebRTC entero.
-
----
-
-## 1. Que arranque y se vea el panel
-
 **Qué debería pasar:** se abre una ventana con la barra lateral de NEXUS REMOTE
-y la pantalla *Panel*.
+y la pantalla *Panel*. Las mismas comprobaciones del paso 1 aparecen en
+**Escritorio remoto**, y en **Configuración**, al final, debería decir que la
+clave privada está cifrada.
 
-**Si falla:** el error de compilación o de enlazado. Cópielo entero.
-
----
-
-## 2. Escritorio remoto → las cuatro comprobaciones
-
-Vaya a **Escritorio remoto**. Hay una tarjeta «Motor de escritorio remoto» con
-cuatro filas. Esto es lo más valioso de toda la sesión, porque comprueba de una
-vez casi todo el código que nunca se ha ejecutado.
-
-| Fila | Debería decir | Si dice otra cosa |
-| --- | --- | --- |
-| **Captura de pantalla** | «N pantalla(s) detectada(s)» | Anote el mensaje: la enumeración de monitores usa cuatro llamadas distintas y el mensaje dice cuál falló |
-| **Control de ratón y teclado** | «backend windows-sendinput listo» | Anote el mensaje |
-| **Portapapeles** | «el portapapeles responde» (con o sin texto dentro) | Anote el mensaje |
-| **Apagar y reiniciar** | «esta cuenta puede apagar el equipo» | Si dice que no tiene permiso, es una cuenta limitada: anótelo, no es un fallo del programa |
-
-Vaya también a **Mis dispositivos → (ninguno todavía)** y a **Configuración**.
-En Configuración, al final, la tarjeta «Identidad de este host» debería decir
-que **la clave privada está cifrada**. Si dice que está sin cifrar, eso es un
-fallo y hay que verlo.
-
-> **Lo que esto no comprueba:** que la captura entregue fotogramas de verdad y
-> que `SendInput` mueva el ratón de verdad. Para eso hace falta una sesión con
-> un dispositivo al otro lado, que es la etapa 4.
+**Si falla:** el error de compilación o de enlazado, copiado entero. Que el
+paso 1 haya funcionado y este no acota mucho dónde está el problema: sería de
+la interfaz, no del motor.
 
 ---
 
-## 3. Las pantallas que detectó
-
-Siga en **Escritorio remoto**, más abajo. Debería listar sus monitores con
-resolución, posición, escala y refresco.
-
-**Compruebe que cuadra con la realidad**, sobre todo:
-
-- Si tiene **más de un monitor**, que estén todos y que la posición relativa
-  sea la correcta.
-- Si usa **escalado** (125 %, 150 %…), que lo diga bien. Esto importa de verdad:
-  las coordenadas del ratón se calculan con ese número, y si está mal el cursor
-  irá a un sitio distinto del que usted toque en el iPad.
-
----
-
-## 4. Carpetas compartidas
+## 3. Carpetas compartidas
 
 En **Configuración → Carpetas compartidas**, añada una carpeta de su PC (por
 ejemplo `C:\Users\<usted>\Intercambio`, créela antes) y marque que se puede
@@ -98,7 +108,7 @@ escribir. Guarde.
 
 ---
 
-## 5. Emparejar (sin servidor todavía)
+## 4. Emparejar (sin servidor todavía)
 
 En **Conexión remota**, genere un código. Debería aparecer un código de 8
 caracteres y un QR, con su cuenta atrás de 5 minutos.
@@ -108,7 +118,7 @@ esto solo comprueba que la pantalla y la generación funcionan.
 
 ---
 
-## 6. Ya con servidor: la conexión
+## 5. Ya con servidor: la conexión
 
 Esto necesita el servidor montado. La guía es
 [`en-el-mismo-pc.md`](en-el-mismo-pc.md), y lo primero de todo es la
@@ -129,9 +139,9 @@ Lo que **sí** tiene que decir que sí es «alcanzable desde otra red».
 
 De lo que falle, lo útil es:
 
-1. **El mensaje exacto**, copiado, no descrito.
-2. **En qué paso** de esta lista.
-3. Si es la detección de pantallas: **cuántos monitores tiene y con qué escalado**.
+1. **El informe del paso 1, entero.** Es lo que más dice.
+2. **El mensaje exacto** de lo que falle, copiado, no descrito.
+3. **En qué paso** de esta lista.
 
 Y de lo que funcione, basta con decir qué pasos pasaron. Con eso, el estado de
 cada pieza deja de ser «compilado» y pasa a ser «probado», que es la diferencia

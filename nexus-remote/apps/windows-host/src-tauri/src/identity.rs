@@ -266,7 +266,11 @@ fn restrict_permissions(path: &Path) -> HostResult<()> {
     })
 }
 
+// Devuelve `Result` aunque aqui nunca falle: la version de Unix si puede
+// fallar, y las dos tienen que tener la misma firma para que quien llama no
+// sepa en que plataforma esta.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn restrict_permissions(_path: &Path) -> HostResult<()> {
     // En Windows los permisos de archivo no aislan de otro proceso del mismo
     // usuario, asi que ahi no hay nada que ajustar: la proteccion que vale es
