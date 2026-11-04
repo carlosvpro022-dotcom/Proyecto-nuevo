@@ -863,6 +863,10 @@ mod tests {
             *self.0.lock().expect("sin envenenar") = Some(text.to_owned());
             Ok(())
         }
+
+        fn probe(&mut self) -> nexus_clipboard::ClipboardResult<bool> {
+            Ok(self.0.lock().expect("sin envenenar").is_some())
+        }
     }
 
     #[test]

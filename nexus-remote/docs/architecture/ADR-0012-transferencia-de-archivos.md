@@ -136,6 +136,37 @@ Lo que cuesta:
   cambio futuro se pueda rechazar en lugar de malinterpretarse.
 - Listar una carpeta enorme recorre la carpeta entera en cada página.
 
+## El listado enseña solo lo que se puede abrir
+
+Un acceso directo dentro de una carpeta compartida puede apuntar fuera de
+ella. Describirlo siguiendo el enlace contaría el **tamaño y la fecha de lo de
+fuera**, aunque descargarlo se rechace después: el dato ya habría salido.
+
+Por eso el listado filtra cada entrada contra la misma política de acceso que
+decide si se puede descargar, y lo hace **al recorrer la carpeta**, antes de
+ordenar y contar. Filtrar después de paginar devolvería páginas más cortas de
+lo que dice el total, y quien pagina se saltaría entradas.
+
+El resultado es un invariante más simple de sostener: lo que aparece en el
+listado se puede abrir, y lo que no se puede abrir no aparece.
+
+## Una ventana que queda abierta, y por qué se deja
+
+Entre que una ruta se resuelve y que se abre pasa un instante. En ese instante,
+alguien que pudiera escribir en la carpeta compartida podría sustituir un
+tramo de la ruta por un enlace que apunte fuera, y lo que se abriría sería lo
+de fuera. Es el problema clásico de comprobar y usar por separado.
+
+Se deja abierta a conciencia, porque **por el protocolo no se puede llegar a
+ella**: un dispositivo remoto solo puede crear archivos normales y carpetas, y
+no hay ninguna operación que cree un enlace. Cerrarla de verdad exigiría
+trabajar con descriptores en lugar de rutas, con llamadas distintas en cada
+sistema operativo, para protegerse de un programa local que ya tendría acceso
+completo a esos archivos por su cuenta.
+
+Si algún día el protocolo permite crear enlaces, esta decisión hay que
+rehacerla.
+
 ## Lo que queda pendiente
 
 - **Sobrescribir con confirmación en el host.** Hoy se rechaza.

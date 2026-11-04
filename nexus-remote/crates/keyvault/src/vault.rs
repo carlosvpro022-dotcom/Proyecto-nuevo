@@ -13,6 +13,8 @@
 //! lleva es una clave antigua en claro, y se migra al cifrarla la primera vez
 //! que el host arranca.
 
+use zeroize::Zeroizing;
+
 use crate::error::{VaultError, VaultResult};
 
 /// Marca con la que empieza todo archivo cifrado por este crate.
@@ -51,11 +53,15 @@ pub trait Vault: Send + Sync {
 
     /// Recupera el secreto de lo guardado.
     ///
+    /// Lo que devuelve **es** la clave privada en claro, asi que viene
+    /// envuelto en [`Zeroizing`]: al soltarlo se borra de la memoria en lugar
+    /// de quedarse en un bloque liberado donde otra cosa podria leerlo.
+    ///
     /// # Errors
     ///
     /// - [`VaultError::Corrupt`] si no lleva la marca o esta truncado.
     /// - [`VaultError::Unsealing`] si el sistema no puede descifrarlo.
-    fn unseal(&self, sealed: &[u8]) -> VaultResult<Vec<u8>>;
+    fn unseal(&self, sealed: &[u8]) -> VaultResult<Zeroizing<Vec<u8>>>;
 }
 
 /// Separa la marca de la carga util.
@@ -97,8 +103,8 @@ impl Vault for PlainVault {
         Ok(out)
     }
 
-    fn unseal(&self, sealed: &[u8]) -> VaultResult<Vec<u8>> {
-        Ok(strip_magic(sealed)?.to_vec())
+    fn unseal(&self, sealed: &[u8]) -> VaultResult<Zeroizing<Vec<u8>>> {
+        Ok(Zeroizing::new(strip_magic(sealed)?.to_vec()))
     }
 }
 
@@ -126,7 +132,10 @@ mod tests {
         let vault = PlainVault;
         let secreto = b"treinta y dos bytes de clave....";
         let guardado = vault.seal(secreto).expect("cifra");
-        assert_eq!(vault.unseal(&guardado).expect("descifra"), secreto);
+        assert_eq!(
+            vault.unseal(&guardado).expect("descifra").as_slice(),
+            secreto
+        );
     }
 
     #[test]

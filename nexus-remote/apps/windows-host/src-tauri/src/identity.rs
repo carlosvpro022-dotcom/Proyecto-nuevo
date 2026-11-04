@@ -34,6 +34,7 @@ use nexus_core::DeviceId;
 use nexus_keyvault::{Vault, default_vault, is_sealed};
 use nexus_security::DeviceIdentity;
 use nexus_security::identity::SECRET_KEY_LEN;
+use zeroize::Zeroizing;
 
 use crate::error::{HostError, HostResult};
 
@@ -132,8 +133,12 @@ fn load(key_path: &Path, id_path: &Path, vault: &dyn Vault) -> HostResult<Loaded
     // Una clave antigua no lleva marca: son los bytes crudos y nada mas. Se
     // reconoce asi y no por el tamano, para no confundirla con un archivo
     // cifrado que casualmente midiera lo mismo.
+    // El contenido del archivo va envuelto para que se borre al soltarlo: si
+    // la clave estaba en claro, estos son los bytes de la clave privada.
+    let guardado = Zeroizing::new(guardado);
+
     let antigua = !is_sealed(&guardado);
-    let secret = if antigua {
+    let secret: Zeroizing<Vec<u8>> = if antigua {
         guardado.clone()
     } else {
         vault.unseal(&guardado).map_err(|e| {
@@ -302,13 +307,13 @@ mod tests {
             Ok(out)
         }
 
-        fn unseal(&self, sealed: &[u8]) -> nexus_keyvault::VaultResult<Vec<u8>> {
+        fn unseal(&self, sealed: &[u8]) -> nexus_keyvault::VaultResult<Zeroizing<Vec<u8>>> {
             let cuerpo = sealed.strip_prefix(nexus_keyvault::SEALED_MAGIC).ok_or(
                 nexus_keyvault::VaultError::Corrupt {
                     reason: "sin marca",
                 },
             )?;
-            Ok(cuerpo.iter().map(|b| !b).collect())
+            Ok(Zeroizing::new(cuerpo.iter().map(|b| !b).collect()))
         }
     }
 
@@ -331,7 +336,7 @@ mod tests {
             unreachable!("no deberia llegar a cifrar")
         }
 
-        fn unseal(&self, _sealed: &[u8]) -> nexus_keyvault::VaultResult<Vec<u8>> {
+        fn unseal(&self, _sealed: &[u8]) -> nexus_keyvault::VaultResult<Zeroizing<Vec<u8>>> {
             Err(nexus_keyvault::VaultError::Unsealing(
                 "viene de otra cuenta".to_owned(),
             ))

@@ -202,4 +202,12 @@ impl Clipboard for WindowsClipboard {
             }
         }
     }
+
+    fn probe(&mut self) -> ClipboardResult<bool> {
+        // SEGURIDAD: consulta de formato disponible, sin punteros. A
+        // diferencia del resto de esta API, **no** necesita abrir el
+        // portapapeles, asi que no toma el cerrojo global ni molesta a los
+        // demas programas. Es lo que la hace apta para llamarse a menudo.
+        Ok(unsafe { IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT.0)) }.is_ok())
+    }
 }

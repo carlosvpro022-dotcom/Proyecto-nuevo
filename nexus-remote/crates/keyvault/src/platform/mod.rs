@@ -48,6 +48,9 @@ mod tests {
         let secreto = [42_u8; 32];
         let guardado = vault.seal(&secreto).expect("cifra");
         assert_ne!(guardado, secreto, "lo guardado lleva al menos la marca");
-        assert_eq!(vault.unseal(&guardado).expect("descifra"), secreto);
+        assert_eq!(
+            vault.unseal(&guardado).expect("descifra").as_slice(),
+            secreto
+        );
     }
 }

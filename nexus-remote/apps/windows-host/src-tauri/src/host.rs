@@ -662,18 +662,17 @@ impl HostService {
             Err(error) => EngineCheck::failed(error.to_string()),
         };
 
-        // Leer el portapapeles es la unica forma de saber si responde. El
-        // contenido se descarta sin mirarlo y sin registrarlo: es del dueno
-        // del PC, no de esta comprobacion.
-        let clipboard = match nexus_clipboard::default_clipboard().read_text() {
-            Ok(texto) => EngineCheck::working(format!(
-                "el portapapeles responde ({} caracteres dentro)",
-                texto.chars().count()
-            )),
-            // Vacio no es un fallo: significa que el portapapeles funciona y
-            // no tiene texto ahora mismo.
-            Err(nexus_clipboard::ClipboardError::Empty) => {
-                EngineCheck::working("el portapapeles responde y esta vacio".to_owned())
+        // Se comprueba **sin abrir el portapapeles y sin leer su contenido**.
+        // El panel llama a esto cada pocos segundos: abrirlo tomaria un
+        // cerrojo global del sistema y haria fallar los copiar y pegar de
+        // otros programas, y leerlo seria mirar lo que la persona tiene
+        // copiado todo el rato, sin ninguna necesidad.
+        let clipboard = match nexus_clipboard::default_clipboard().probe() {
+            Ok(true) => EngineCheck::working("el portapapeles responde y tiene texto".to_owned()),
+            // Vacio no es un fallo: el portapapeles funciona y ahora no tiene
+            // texto.
+            Ok(false) => {
+                EngineCheck::working("el portapapeles responde y no tiene texto".to_owned())
             }
             Err(error) => EngineCheck::failed(error.to_string()),
         };

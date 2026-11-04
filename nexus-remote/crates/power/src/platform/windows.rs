@@ -23,6 +23,13 @@
 //! retorno es el error clasico de este codigo, y por eso aqui se mira tambien
 //! el ultimo error.
 //!
+//! # El privilegio no se queda puesto
+//!
+//! Comprobar si esta cuenta puede apagar exige activar el privilegio. Despues
+//! se vuelve a desactivar: dejarlo puesto haria que el host corriera siempre
+//! con permiso para apagar el equipo, y un fallo en cualquier otra parte del
+//! programa podria aprovecharlo. Se activa cuando hace falta y no antes.
+//!
 //! # Por que no se fuerza el cierre de los programas
 //!
 //! Se usa `EWX_FORCEIFHUNG`, que cierra los programas que no responden, y no
@@ -39,7 +46,8 @@ use nexus_core::protocol::control::PowerAction;
 use windows::Win32::Foundation::{CloseHandle, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, LUID};
 use windows::Win32::Security::{
     AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
-    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES,
+    TOKEN_QUERY,
 };
 use windows::Win32::System::Shutdown::{
     EWX_FORCEIFHUNG, EWX_REBOOT, EWX_SHUTDOWN, EXIT_WINDOWS_FLAGS, ExitWindowsEx, LockWorkStation,
@@ -80,10 +88,14 @@ impl PowerControl for WindowsPower {
     }
 
     fn probe(&mut self) -> PowerResult<()> {
-        // Activar el privilegio no apaga nada ni cambia nada que importe: lo
-        // unico que hace es decir si esta cuenta podria hacerlo. Es la mitad
-        // del trabajo de un apagado, sin la otra mitad.
-        enable_shutdown_privilege()
+        // Activar el privilegio dice si esta cuenta podria apagar, sin apagar
+        // nada. Pero se vuelve a desactivar: dejarlo puesto haria que el host
+        // corriera siempre con permiso para apagar el equipo, y un fallo en
+        // cualquier otra parte del programa podria aprovecharlo. Se activa
+        // cuando hace falta y no antes.
+        let resultado = with_token(|token| adjust_privilege(token, true));
+        let _ = with_token(|token| adjust_privilege(token, false));
+        resultado
     }
 }
 
@@ -99,6 +111,11 @@ fn exit_windows(flags: EXIT_WINDOWS_FLAGS) -> PowerResult<()> {
 
 /// Activa `SeShutdownPrivilege` en el testigo de este proceso.
 fn enable_shutdown_privilege() -> PowerResult<()> {
+    with_token(|token| adjust_privilege(token, true))
+}
+
+/// Abre el testigo del proceso, hace algo con el y lo cierra siempre.
+fn with_token(trabajo: impl FnOnce(HANDLE) -> PowerResult<()>) -> PowerResult<()> {
     let mut token = HANDLE::default();
 
     // SEGURIDAD: `GetCurrentProcess` devuelve un pseudo-identificador que no
@@ -113,7 +130,7 @@ fn enable_shutdown_privilege() -> PowerResult<()> {
     }
     .map_err(|e| PowerError::System(e.to_string()))?;
 
-    let resultado = adjust_privilege(token);
+    let resultado = trabajo(token);
 
     // SEGURIDAD: cierra el testigo que esta funcion abrio, una sola vez.
     if let Err(error) = unsafe { CloseHandle(token) } {
@@ -123,8 +140,8 @@ fn enable_shutdown_privilege() -> PowerResult<()> {
     resultado
 }
 
-/// Pide al sistema que active el privilegio en el testigo recibido.
-fn adjust_privilege(token: HANDLE) -> PowerResult<()> {
+/// Activa o desactiva el privilegio en el testigo recibido.
+fn adjust_privilege(token: HANDLE, activar: bool) -> PowerResult<()> {
     let mut luid = LUID::default();
     // SEGURIDAD: escribe en `luid`, variable local viva durante la llamada.
     unsafe { LookupPrivilegeValueW(None, SE_SHUTDOWN_NAME, &raw mut luid) }
@@ -134,7 +151,11 @@ fn adjust_privilege(token: HANDLE) -> PowerResult<()> {
         PrivilegeCount: 1,
         Privileges: [LUID_AND_ATTRIBUTES {
             Luid: luid,
-            Attributes: SE_PRIVILEGE_ENABLED,
+            Attributes: if activar {
+                SE_PRIVILEGE_ENABLED
+            } else {
+                TOKEN_PRIVILEGES_ATTRIBUTES(0)
+            },
         }],
     };
 

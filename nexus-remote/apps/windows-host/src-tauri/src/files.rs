@@ -41,7 +41,7 @@ use nexus_core::{Timestamp, TransferId};
 use nexus_file_transfer::error::{FileError, FileResult};
 use nexus_file_transfer::{
     Accepted, Access, AccessPolicy, ChunkReader, ChunkWriter, Direction, Frame, TransferTracker,
-    list_dir,
+    list_dir_where,
 };
 
 /// Bytes que tienen que pasar antes de volver a informar del progreso.
@@ -143,7 +143,13 @@ impl FileService {
     /// [`FileError::WrongKind`] si la ruta no es un directorio.
     pub fn list(&self, path: &str, offset: u64) -> FileResult<ControlResponse> {
         let resolved = self.policy.resolve(Path::new(path), Access::Read)?;
-        let listing = list_dir(&resolved, offset)?;
+        // El listado ensena solo lo que de verdad se puede abrir. Un acceso
+        // directo que apunte fuera de las carpetas compartidas no aparece: si
+        // apareciera, su tamano y su fecha contarian algo de fuera aunque
+        // descargarlo se rechazara despues.
+        let listing = list_dir_where(&resolved, offset, |candidato| {
+            self.policy.resolve(candidato, Access::Read).is_ok()
+        })?;
         Ok(ControlResponse::DirListing {
             // Se devuelve la ruta tal como la resolvio el host, no la que
             // llego: asi quien pregunta sabe sobre que se le contesto.
@@ -173,10 +179,14 @@ impl FileService {
         let resolved = self.policy.resolve(Path::new(path), Access::Read)?;
 
         // El lector se abre antes de apuntar la transferencia: si el archivo no
-        // existe o es una carpeta, no se ocupa una de las plazas.
-        let probe = ChunkReader::open(TransferId::new(), &resolved)?;
-        let total_bytes = probe.total_bytes();
-        drop(probe);
+        // existe o es una carpeta, no se ocupa una de las plazas. Y el tamano
+        // que se anuncia es el del archivo que de verdad se va a leer.
+        // El archivo se abre una sola vez. Abrirlo para mirar el tamano y
+        // otra vez para leerlo permitiria que cambiara entre medias: se
+        // anunciaria un tamano y se enviaria otro, y quien recibe lo veria
+        // como un fallo suyo.
+        let reader = ChunkReader::open(TransferId::new(), &resolved)?;
+        let total_bytes = reader.total_bytes();
 
         let transfer = self.tracker.start(
             Direction::Download,
@@ -184,7 +194,7 @@ impl FileService {
             Some(total_bytes),
             now,
         )?;
-        let reader = ChunkReader::open(transfer.id, &resolved)?;
+        let reader = reader.with_id(transfer.id);
 
         let cancelled = Arc::new(AtomicBool::new(false));
         self.downloads.insert(transfer.id, Arc::clone(&cancelled));
@@ -661,6 +671,59 @@ mod tests {
                 assert_eq!(entries[0].name, "informe.txt");
             }
             other => panic!("se esperaba un listado: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn un_acceso_directo_que_apunta_fuera_no_sale_en_el_listado() {
+        // Lo que se protege: el tamano y la fecha de lo que hay fuera de las
+        // carpetas compartidas. Descargarlo ya se rechazaba; lo que faltaba
+        // era que no se contara al listar.
+        let f = fixture();
+        std::os::unix::fs::symlink(&f.fuera, f.lectura.join("atajo")).expect("crea enlace");
+
+        let response = f.service.list(&ruta(&f.lectura), 0).expect("lista");
+        match response {
+            ControlResponse::DirListing {
+                entries,
+                total_entries,
+                ..
+            } => {
+                let nombres: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert!(
+                    !nombres.contains(&"atajo"),
+                    "el enlace que escapa no debe aparecer: {nombres:?}"
+                );
+                assert_eq!(nombres, ["informe.txt"]);
+                assert_eq!(total_entries, 1, "el total tampoco debe contarlo");
+            }
+            otro => panic!("se esperaba un listado: {otro:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn un_acceso_directo_que_se_queda_dentro_si_sale() {
+        // El reverso: un enlace que no escapa es util y tiene que verse.
+        let f = fixture();
+        std::fs::create_dir_all(f.lectura.join("real")).expect("crea");
+        std::os::unix::fs::symlink(f.lectura.join("real"), f.lectura.join("alias"))
+            .expect("crea enlace");
+
+        let response = f.service.list(&ruta(&f.lectura), 0).expect("lista");
+        match response {
+            ControlResponse::DirListing { entries, .. } => {
+                let alias = entries
+                    .iter()
+                    .find(|e| e.name == "alias")
+                    .expect("deberia verse");
+                assert!(
+                    alias.is_dir,
+                    "un enlace interno a carpeta se ve como carpeta"
+                );
+            }
+            otro => panic!("se esperaba un listado: {otro:?}"),
         }
     }
 

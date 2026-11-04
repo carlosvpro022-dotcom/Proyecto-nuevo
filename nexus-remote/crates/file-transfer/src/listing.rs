@@ -82,6 +82,28 @@ impl Listing {
 /// - [`FileError::WrongKind`] si no es un directorio.
 /// - [`FileError::Io`] si la carpeta no se puede leer.
 pub fn list_dir(path: &Path, offset: u64) -> FileResult<Listing> {
+    list_dir_where(path, offset, |_| true)
+}
+
+/// Lista una pagina quedandose solo con las entradas que `alcanzable` acepte.
+///
+/// Existe por una fuga pequena pero real. Un acceso directo dentro de una
+/// carpeta compartida puede apuntar fuera de ella, y describirlo siguiendo el
+/// enlace contaria el tamano y la fecha de **lo de fuera**. Descargarlo si se
+/// rechaza, pero el dato ya habria salido.
+///
+/// El filtro se aplica al recorrer, antes de ordenar y contar, para que el
+/// total y las paginas sigan cuadrando: filtrar despues devolveria paginas mas
+/// cortas de lo que dice el total y quien pagina se saltaria entradas.
+///
+/// # Errors
+///
+/// Las mismas que [`list_dir`].
+pub fn list_dir_where(
+    path: &Path,
+    offset: u64,
+    alcanzable: impl Fn(&Path) -> bool,
+) -> FileResult<Listing> {
     let metadata = std::fs::metadata(path).map_err(|e| map_io(&e, path))?;
     if !metadata.is_dir() {
         return Err(FileError::WrongKind {
@@ -102,6 +124,9 @@ pub fn list_dir(path: &Path, offset: u64) -> FileResult<Listing> {
         // invalida el listado: se omite y se sigue. Un directorio con un
         // archivo problematico tiene que poder mirarse.
         let Ok(entry) = item else { continue };
+        if !alcanzable(&entry.path()) {
+            continue;
+        }
         let Some(described) = describe(&entry) else {
             continue;
         };
@@ -455,6 +480,59 @@ mod tests {
         assert_eq!(listing.total_entries, 2);
         assert!(names(&listing).contains(&"roto".to_owned()));
         assert!(names(&listing).contains(&"real.txt".to_owned()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_escaping_symlink_is_not_listed_at_all() {
+        // La fuga que cierra el filtro: describir el enlace siguiendolo
+        // contaria el tamano y la fecha de lo que hay fuera de la carpeta
+        // compartida, aunque descargarlo se rechace despues.
+        let d = dir_with(&["dentro.txt"]);
+        let fuera = tempfile::tempdir().expect("temporal");
+        fs::write(fuera.path().join("secreto.txt"), vec![0_u8; 4_096]).expect("crea");
+        std::os::unix::fs::symlink(fuera.path(), d.path.join("atajo")).expect("crea enlace");
+
+        // Sin filtro aparece, con su tamano de fuera.
+        let todo = list_dir(&d.path, 0).expect("lista");
+        assert!(names(&todo).contains(&"atajo".to_owned()));
+
+        // Con el filtro de la politica de acceso, no.
+        let raiz = d.path.clone();
+        let listing = list_dir_where(&d.path, 0, |p| {
+            std::fs::canonicalize(p).is_ok_and(|real| real.starts_with(&raiz))
+        })
+        .expect("lista");
+
+        assert_eq!(names(&listing), ["dentro.txt"]);
+        assert_eq!(
+            listing.total_entries, 1,
+            "el total tambien tiene que contar solo lo que se puede ver"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_filter_keeps_pages_and_totals_consistent() {
+        // Filtrar despues de paginar daria paginas mas cortas que el total y
+        // quien pagina se saltaria entradas. Por eso se filtra al recorrer.
+        let listed: Vec<String> = (0..50).map(|i| format!("ok-{i:03}.txt")).collect();
+        let refs: Vec<&str> = listed.iter().map(String::as_str).collect();
+        let d = dir_with(&refs);
+        for i in 0..50 {
+            fs::write(d.path.join(format!("no-{i:03}.txt")), b"x").expect("crea");
+        }
+
+        let listing = list_dir_where(&d.path, 0, |p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("ok-"))
+        })
+        .expect("lista");
+
+        assert_eq!(listing.total_entries, 50);
+        assert_eq!(listing.entries.len(), 50);
+        assert!(!listing.has_more());
+        assert!(listing.entries.iter().all(|e| e.name.starts_with("ok-")));
     }
 
     #[test]

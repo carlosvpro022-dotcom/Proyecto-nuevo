@@ -41,6 +41,8 @@ use windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 
+use zeroize::Zeroizing;
+
 use crate::error::{VaultError, VaultResult};
 use crate::vault::{SEALED_MAGIC, Vault, strip_magic};
 
@@ -69,6 +71,9 @@ struct DpapiBuffer(CRYPT_INTEGER_BLOB);
 
 impl DpapiBuffer {
     /// Copia el contenido a un vector propio.
+    ///
+    /// El bloque original lo borra `drop`: DPAPI lo reservo, y al descifrar
+    /// contiene la clave privada en claro.
     fn to_vec(&self) -> Vec<u8> {
         if self.0.pbData.is_null() || self.0.cbData == 0 {
             return Vec::new();
@@ -83,6 +88,13 @@ impl Drop for DpapiBuffer {
     fn drop(&mut self) {
         if self.0.pbData.is_null() {
             return;
+        }
+        // Al descifrar, este bloque tiene la clave privada en claro. Se borra
+        // antes de devolverlo al sistema para no dejarla en memoria liberada.
+        // SEGURIDAD: el puntero y el tamano son los que escribio DPAPI para
+        // este bloque, que sigue siendo suyo hasta el `LocalFree` de abajo.
+        unsafe {
+            std::ptr::write_bytes(self.0.pbData, 0, self.0.cbData as usize);
         }
         // SEGURIDAD: libera exactamente el bloque que DPAPI reservo, una sola
         // vez: el puntero se pone a nulo despues.
@@ -140,7 +152,7 @@ impl Vault for WindowsVault {
         Ok(out)
     }
 
-    fn unseal(&self, sealed: &[u8]) -> VaultResult<Vec<u8>> {
+    fn unseal(&self, sealed: &[u8]) -> VaultResult<Zeroizing<Vec<u8>>> {
         let cuerpo = strip_magic(sealed)?;
         if cuerpo.is_empty() {
             return Err(VaultError::Corrupt {
@@ -168,6 +180,6 @@ impl Vault for WindowsVault {
         }
         .map_err(|e| VaultError::Unsealing(e.to_string()))?;
 
-        Ok(DpapiBuffer(salida).to_vec())
+        Ok(Zeroizing::new(DpapiBuffer(salida).to_vec()))
     }
 }

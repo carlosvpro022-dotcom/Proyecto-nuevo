@@ -46,6 +46,22 @@ pub trait Clipboard: Send {
     ///
     /// Las mismas que [`Clipboard::read_text`], mas los fallos del sistema.
     fn write_text(&mut self, text: &str) -> ClipboardResult<()>;
+
+    /// Comprueba si hay portapapeles, **sin abrirlo y sin leer su contenido**.
+    ///
+    /// Devuelve si ahora mismo hay texto dentro.
+    ///
+    /// Existe porque el panel comprueba el estado del equipo cada pocos
+    /// segundos, y hacerlo con [`Clipboard::read_text`] tendria dos problemas
+    /// serios. El primero: abrir el portapapeles toma un cerrojo global del
+    /// sistema, y tomarlo cada pocos segundos hace fallar los copiar y pegar
+    /// de otros programas. El segundo: leeria el contenido del portapapeles de
+    /// la persona continuamente, sin ninguna necesidad.
+    ///
+    /// # Errors
+    ///
+    /// [`ClipboardError::UnsupportedPlatform`] donde no hay backend.
+    fn probe(&mut self) -> ClipboardResult<bool>;
 }
 
 /// Comprueba que un texto se puede mover por el canal de control.
@@ -137,6 +153,10 @@ impl Clipboard for MemoryClipboard {
         self.content = Some(text.to_owned());
         Ok(())
     }
+
+    fn probe(&mut self) -> ClipboardResult<bool> {
+        Ok(self.content.is_some())
+    }
 }
 
 /// Portapapeles de las plataformas que no tienen backend.
@@ -159,6 +179,12 @@ impl Clipboard for UnsupportedClipboard {
     }
 
     fn write_text(&mut self, _text: &str) -> ClipboardResult<()> {
+        Err(ClipboardError::UnsupportedPlatform {
+            platform: std::env::consts::OS,
+        })
+    }
+
+    fn probe(&mut self) -> ClipboardResult<bool> {
         Err(ClipboardError::UnsupportedPlatform {
             platform: std::env::consts::OS,
         })
@@ -242,6 +268,20 @@ mod tests {
     fn se_puede_arrancar_con_contenido() {
         let mut c = MemoryClipboard::with_text("de antes");
         assert_eq!(c.read_text().expect("lee"), "de antes");
+    }
+
+    #[test]
+    fn comprobar_no_lee_ni_cuenta_como_lectura() {
+        // El panel comprueba el estado cada pocos segundos. Si eso contara
+        // como leer, estaria leyendo el portapapeles de la persona todo el
+        // rato.
+        let mut c = MemoryClipboard::with_text("algo copiado");
+        assert!(c.probe().expect("comprueba"));
+        assert_eq!(c.reads(), 0, "comprobar no es leer");
+
+        let mut vacio = MemoryClipboard::new();
+        assert!(!vacio.probe().expect("comprueba"));
+        assert_eq!(vacio.reads(), 0);
     }
 
     #[test]

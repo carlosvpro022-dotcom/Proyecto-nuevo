@@ -36,5 +36,5 @@ pub use access::{Access, AccessPolicy, SharedRoot};
 pub use error::{FileError, FileResult};
 pub use frame::{Frame, MAX_FRAME_BYTES};
 pub use io::{Accepted, ChunkReader, ChunkWriter};
-pub use listing::{Listing, list_dir};
+pub use listing::{Listing, list_dir, list_dir_where};
 pub use transfer::{CHUNK_SIZE_BYTES, Direction, Transfer, TransferTracker};

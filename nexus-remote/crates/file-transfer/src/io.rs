@@ -85,6 +85,19 @@ impl ChunkReader {
         })
     }
 
+    /// Cambia el identificador con el que se marcaran los marcos.
+    ///
+    /// Hace falta porque el identificador de la transferencia lo asigna la
+    /// contabilidad, y la contabilidad necesita saber el tamano del archivo,
+    /// que solo se sabe abriendolo. Con esto el archivo se abre **una sola
+    /// vez**: abrirlo dos veces permitiria que cambiara entre medias y que se
+    /// anunciara un tamano distinto del que se envia.
+    #[must_use]
+    pub fn with_id(mut self, transfer_id: TransferId) -> Self {
+        self.transfer_id = transfer_id;
+        self
+    }
+
     /// Tamano que tenia el archivo al abrirlo.
     #[must_use]
     pub const fn total_bytes(&self) -> u64 {
@@ -603,6 +616,26 @@ mod tests {
         drain(&mut reader);
         assert!(reader.next_frame().expect("no falla").is_none());
         assert!(reader.next_frame().expect("sigue sin fallar").is_none());
+    }
+
+    #[test]
+    fn the_reader_can_adopt_the_identifier_it_will_use() {
+        let temp = tempfile::tempdir().expect("temporal");
+        let source = temp.path().join("a.bin");
+        std::fs::write(&source, b"contenido").expect("escribe");
+
+        let definitivo = TransferId::new();
+        let mut reader = ChunkReader::open(TransferId::new(), &source)
+            .expect("abre")
+            .with_id(definitivo);
+
+        for frame in drain(&mut reader) {
+            assert_eq!(
+                frame.transfer_id(),
+                definitivo,
+                "todos los marcos llevan el identificador definitivo"
+            );
+        }
     }
 
     #[test]
