@@ -86,6 +86,10 @@ pub struct HostSummary {
     pub active_devices: usize,
     /// Numero de dispositivos revocados.
     pub revoked_devices: usize,
+    /// Si la clave privada de este host esta cifrada en disco.
+    pub key_protected: bool,
+    /// Como esta protegida, o por que no lo esta.
+    pub key_detail: String,
 }
 
 /// Dispositivo tal como lo ve el panel.
@@ -215,6 +219,8 @@ pub fn build_host_summary(host: &mut HostService) -> crate::error::HostResult<Ho
         signaling_url: host.signaling_url()?,
         active_devices: devices.iter().filter(|d| d.is_active()).count(),
         revoked_devices: devices.iter().filter(|d| !d.is_active()).count(),
+        key_protected: host.key_state().protected,
+        key_detail: host.key_state().detail.clone(),
     })
 }
 
@@ -356,7 +362,7 @@ fn fundacion() -> Vec<FeatureStatus> {
             label: "Identidad criptografica del host",
             state: Working,
             stage: 1,
-            detail: "Par Ed25519 propio, persistente entre arranques.",
+            detail: "Par Ed25519 propio, persistente entre arranques. En Windows la clave se guarda cifrada con DPAPI; una clave antigua en claro se migra al arrancar.",
         },
         FeatureStatus {
             key: "pairing",

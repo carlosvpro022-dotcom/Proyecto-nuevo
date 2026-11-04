@@ -1028,6 +1028,10 @@ mod tests {
             self.0.lock().expect("sin envenenar").push(action);
             Ok(())
         }
+
+        fn probe(&mut self) -> nexus_power::PowerResult<()> {
+            Ok(())
+        }
     }
 
     /// Pide una operacion de energia y devuelve lo que conteste el host.

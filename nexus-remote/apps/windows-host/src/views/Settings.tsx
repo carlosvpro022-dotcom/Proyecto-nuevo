@@ -273,11 +273,19 @@ export function Settings({
           </tbody>
         </table>
         <div style={{ marginTop: "var(--space-4)" }}>
-          <Notice tone="warn">
-            La clave privada de este host se guarda en disco sin cifrar. En Windows los
-            permisos de archivo no la protegen de otro programa del mismo usuario:
-            falta cifrarla con DPAPI, que esta recogido como tarea de la etapa 6.
-          </Notice>
+          {summary.keyProtected ? (
+            <Notice tone="accent">
+              La clave privada de este host esta cifrada en disco:{" "}
+              {summary.keyDetail}. En Windows eso ata el descifrado a su cuenta,
+              asi que el archivo copiado a otro equipo no sirve.
+            </Notice>
+          ) : (
+            <Notice tone="warn">
+              La clave privada de este host esta {summary.keyDetail}. Quien
+              pueda leer ese archivo puede hacerse pasar por este equipo. En
+              Windows si se cifra; aqui no hay almacen de claves del sistema.
+            </Notice>
+          )}
         </div>
       </Card>
     </div>

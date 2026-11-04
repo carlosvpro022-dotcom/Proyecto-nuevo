@@ -2609,6 +2609,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-keyvault"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "nexus-power"
 version = "0.1.0"
 dependencies = [
@@ -2687,6 +2696,7 @@ dependencies = [
  "nexus-core",
  "nexus-file-transfer",
  "nexus-input",
+ "nexus-keyvault",
  "nexus-power",
  "nexus-security",
  "nexus-transport",

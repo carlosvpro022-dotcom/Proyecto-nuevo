@@ -21,6 +21,18 @@ pub trait PowerControl: Send {
     /// - [`PowerError::PrivilegeDenied`] si la cuenta no puede apagar.
     /// - [`PowerError::System`] ante cualquier otro fallo del sistema.
     fn execute(&mut self, action: PowerAction) -> PowerResult<()>;
+
+    /// Comprueba si este equipo podria apagarse, **sin apagarlo**.
+    ///
+    /// Sirve para avisar antes y no cuando ya haga falta: en Windows, apagar
+    /// exige un privilegio que una cuenta puede no tener, y descubrirlo el
+    /// dia que se necesita es tarde.
+    ///
+    /// # Errors
+    ///
+    /// Las mismas que [`PowerControl::execute`], salvo que aqui no se ejecuta
+    /// ninguna operacion.
+    fn probe(&mut self) -> PowerResult<()>;
 }
 
 /// Backend que anota lo que se le pide y no toca el equipo.
@@ -57,6 +69,10 @@ impl PowerControl for RecordingPower {
         self.executed.push(action);
         Ok(())
     }
+
+    fn probe(&mut self) -> PowerResult<()> {
+        Ok(())
+    }
 }
 
 /// Backend de las plataformas que no tienen energia implementada.
@@ -76,6 +92,12 @@ impl PowerControl for UnsupportedPower {
             platform: std::env::consts::OS,
         })
     }
+
+    fn probe(&mut self) -> PowerResult<()> {
+        Err(PowerError::UnsupportedPlatform {
+            platform: std::env::consts::OS,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +112,18 @@ mod tests {
         power.execute(PowerAction::Lock).expect("anota");
         power.execute(PowerAction::Reboot).expect("anota");
         assert_eq!(power.executed(), [PowerAction::Lock, PowerAction::Reboot]);
+    }
+
+    #[test]
+    fn la_comprobacion_no_ejecuta_nada() {
+        // Si `probe` apagara algo, esta prueba apagaria la maquina donde
+        // corre. Que no lo haga es justamente lo que se comprueba.
+        let mut power = RecordingPower::new();
+        power.probe().expect("la comprobacion deberia salir bien");
+        assert!(
+            power.executed().is_empty(),
+            "comprobar no puede ejecutar nada"
+        );
     }
 
     #[test]

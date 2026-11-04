@@ -94,10 +94,18 @@ pub struct EngineStatus {
     pub capture: EngineCheck,
     /// Inyeccion de raton y teclado.
     pub input: EngineCheck,
+    /// Portapapeles del sistema.
+    pub clipboard: EngineCheck,
+    /// Si esta cuenta podria apagar el equipo.
+    pub power: EngineCheck,
 }
 
 impl EngineStatus {
     /// Indica si el equipo puede sostener una sesion remota completa.
+    ///
+    /// Solo cuentan la captura y la entrada: sin ellas no hay escritorio
+    /// remoto. El portapapeles y el apagado son funciones sueltas, y que
+    /// falten no impide usar el equipo en remoto.
     #[must_use]
     pub const fn is_ready(&self) -> bool {
         self.capture.working && self.input.working
@@ -107,6 +115,7 @@ impl EngineStatus {
 /// Servicio del host.
 pub struct HostService {
     identity: DeviceIdentity,
+    key_state: crate::identity::KeyState,
     store: Store,
     pairing: Option<OpenPairing>,
 }
@@ -119,13 +128,27 @@ impl HostService {
     /// [`HostError::Io`] si el directorio no es utilizable,
     /// [`HostError::Database`] si la base de datos no se puede abrir.
     pub fn open(data_dir: &Path) -> HostResult<Self> {
-        let identity = crate::identity::load_or_create(data_dir)?;
+        let vault = nexus_keyvault::default_vault();
+        let cargada = crate::identity::load_or_create_with(data_dir, vault.as_ref())?;
+        if !cargada.key.protected {
+            tracing::warn!(
+                motivo = %cargada.key.detail,
+                "la clave privada del host no esta cifrada en disco"
+            );
+        }
         let store = Store::open(&data_dir.join("nexus-host.db"))?;
         Ok(Self {
-            identity,
+            identity: cargada.identity,
+            key_state: cargada.key,
             store,
             pairing: None,
         })
+    }
+
+    /// Como esta protegida la clave privada de este host en disco.
+    #[must_use]
+    pub const fn key_state(&self) -> &crate::identity::KeyState {
+        &self.key_state
     }
 
     /// Arranca el servicio con todo en memoria. Para pruebas.
@@ -136,6 +159,14 @@ impl HostService {
     pub fn open_ephemeral(identity: DeviceIdentity) -> HostResult<Self> {
         Ok(Self {
             identity,
+            // Un host en memoria no tiene clave en disco que proteger. Se dice
+            // asi en lugar de afirmar que esta cifrada.
+            key_state: crate::identity::KeyState {
+                protected: false,
+                vault: "en-memoria",
+                migrated: false,
+                detail: "este host no guarda la clave en disco".to_owned(),
+            },
             store: Store::open_in_memory()?,
             pairing: None,
         })
@@ -631,7 +662,35 @@ impl HostService {
             Err(error) => EngineCheck::failed(error.to_string()),
         };
 
-        EngineStatus { capture, input }
+        // Leer el portapapeles es la unica forma de saber si responde. El
+        // contenido se descarta sin mirarlo y sin registrarlo: es del dueno
+        // del PC, no de esta comprobacion.
+        let clipboard = match nexus_clipboard::default_clipboard().read_text() {
+            Ok(texto) => EngineCheck::working(format!(
+                "el portapapeles responde ({} caracteres dentro)",
+                texto.chars().count()
+            )),
+            // Vacio no es un fallo: significa que el portapapeles funciona y
+            // no tiene texto ahora mismo.
+            Err(nexus_clipboard::ClipboardError::Empty) => {
+                EngineCheck::working("el portapapeles responde y esta vacio".to_owned())
+            }
+            Err(error) => EngineCheck::failed(error.to_string()),
+        };
+
+        // Comprueba el privilegio sin apagar nada, para avisar antes y no el
+        // dia que haga falta.
+        let power = match nexus_power::default_power().probe() {
+            Ok(()) => EngineCheck::working("esta cuenta puede apagar el equipo".to_owned()),
+            Err(error) => EngineCheck::failed(error.to_string()),
+        };
+
+        EngineStatus {
+            capture,
+            input,
+            clipboard,
+            power,
+        }
     }
 }
 

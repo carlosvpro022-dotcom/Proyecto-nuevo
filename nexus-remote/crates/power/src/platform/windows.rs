@@ -78,6 +78,13 @@ impl PowerControl for WindowsPower {
             PowerAction::Shutdown => exit_windows(EWX_SHUTDOWN | EWX_FORCEIFHUNG),
         }
     }
+
+    fn probe(&mut self) -> PowerResult<()> {
+        // Activar el privilegio no apaga nada ni cambia nada que importe: lo
+        // unico que hace es decir si esta cuenta podria hacerlo. Es la mitad
+        // del trabajo de un apagado, sin la otra mitad.
+        enable_shutdown_privilege()
+    }
 }
 
 /// Activa el privilegio de apagado y ejecuta la operacion.

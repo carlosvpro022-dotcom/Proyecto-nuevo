@@ -21,10 +21,25 @@ Está en la misma pantalla del panel, y aquí por escrito:
 
 | Pendiente | Etapa | Riesgo mientras tanto |
 | --- | --- | --- |
-| Cifrar la clave privada del host con DPAPI | 6 | En Windows, otro proceso del mismo usuario puede leerla del disco |
 | Medios cifrados extremo a extremo en marcha | 3 | DTLS-SRTP está elegido pero no hay sesión todavía |
 | TLS de la señalización probado de extremo a extremo | 3 | El despliegue está escrito pero no ejecutado |
 | Revisión de seguridad del sistema en marcha | 6 | Nada se ha probado contra un sistema funcionando |
+
+### Sobre la clave privada del host
+
+Ya **se cifra**. En Windows con DPAPI, que ata el descifrado a la cuenta: el
+archivo copiado a otro equipo o leído desde otra cuenta no sirve. Una clave
+guardada antes de que existiera el cifrado se migra al arrancar, sin cambiar la
+identidad del equipo.
+
+Lo que DPAPI **no** evita: un programa que corra como esa misma cuenta puede
+pedirle que descifre, igual que hace el host. Sube el listón —ya no basta con
+copiar el archivo— pero no lo hace imposible. Evitarlo exigiría pedir una
+contraseña en cada arranque, y eso es incompatible con el acceso desatendido,
+que es el motivo de existir de este producto.
+
+Fuera de Windows no hay almacén del sistema y la clave queda en claro. El panel
+lo dice, en lugar de dejar la limitación escondida en un comentario.
 
 ### Sobre el acceso al disco
 

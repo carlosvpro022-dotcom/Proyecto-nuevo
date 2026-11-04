@@ -27,6 +27,8 @@ export function RemoteDesktop({
 }) {
   const capture = features.find((f) => f.key === "capture");
   const input = features.find((f) => f.key === "input");
+  const clipboard = features.find((f) => f.key === "clipboard");
+  const power = features.find((f) => f.key === "power");
   const video = features.find((f) => f.key === "video");
   const internet = features.find((f) => f.key === "internet");
 
@@ -53,6 +55,16 @@ export function RemoteDesktop({
             name="Control de raton y teclado"
             check={engine?.input ?? null}
             note={input?.detail}
+          />
+          <EngineRow
+            name="Portapapeles"
+            check={engine?.clipboard ?? null}
+            note={clipboard?.detail}
+          />
+          <EngineRow
+            name="Apagar y reiniciar"
+            check={engine?.power ?? null}
+            note={power?.detail}
           />
         </div>
       </Card>

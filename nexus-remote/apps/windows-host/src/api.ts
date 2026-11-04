@@ -25,6 +25,10 @@ export interface HostSummary {
   signalingUrl: string | null;
   activeDevices: number;
   revokedDevices: number;
+  /** Si la clave privada de este host esta cifrada en disco. */
+  keyProtected: boolean;
+  /** Como esta protegida, o por que no lo esta. */
+  keyDetail: string;
 }
 
 export interface SystemStatus {
@@ -84,6 +88,9 @@ export interface EngineCheck {
 export interface EngineStatus {
   capture: EngineCheck;
   input: EngineCheck;
+  clipboard: EngineCheck;
+  /** Si esta cuenta de Windows podria apagar el equipo. */
+  power: EngineCheck;
 }
 
 /** Una pantalla detectada en el host. */
@@ -227,6 +234,8 @@ interface RawHostSummary {
   signaling_url: string | null;
   active_devices: number;
   revoked_devices: number;
+  key_protected: boolean;
+  key_detail: string;
 }
 
 interface RawDeviceSummary {
@@ -287,6 +296,8 @@ function mapSummary(raw: RawHostSummary): HostSummary {
     signalingUrl: raw.signaling_url,
     activeDevices: raw.active_devices,
     revokedDevices: raw.revoked_devices,
+    keyProtected: raw.key_protected,
+    keyDetail: raw.key_detail,
   };
 }
 
