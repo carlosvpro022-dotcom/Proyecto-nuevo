@@ -12,16 +12,33 @@
 //! se hace, y **en que** se traduce, se ejecuta y se comprueba en cualquier
 //! sistema; lo unico especifico de Windows es la ultima llamada.
 
+use nexus_clipboard::{Clipboard, ClipboardError, check_text, default_clipboard};
 use nexus_core::monitor::MonitorLayout;
 use nexus_core::protocol::Envelope;
+use nexus_core::protocol::control::PowerAction;
 use nexus_core::protocol::control::{ControlMessage, ControlRequest, ControlResponse, HostEvent};
-use nexus_core::{CoreError, PermissionSet, Timestamp};
+use nexus_core::protocol::input::InputEvent;
+use nexus_core::{CoreError, PermissionSet, QualityPreset, QualityProfile, Timestamp};
 use nexus_file_transfer::AccessPolicy;
 use nexus_file_transfer::error::FileError;
 use nexus_input::{InputInjector, resolve};
+use nexus_power::{PowerControl, PowerError, default_power};
 
+use crate::confirmation::{Pending, Redeem, SharedConfirmations};
 use crate::error::{HostError, HostResult};
 use crate::files::{Download, FileService, TransferReport, deny_code, deny_message};
+
+/// Lo que el host devuelve por el canal de control.
+///
+/// Una respuesta contesta a lo que se pregunto; un evento es algo que el host
+/// cuenta sin que nadie lo pida. Cancelar una transferencia produce lo
+/// segundo, y por eso las dos cosas comparten camino de salida.
+enum Respuesta {
+    /// Respuesta a una peticion concreta.
+    Control(ControlResponse),
+    /// Evento empujado por el host.
+    Evento(HostEvent),
+}
 
 /// Atiende el canal de control de una sesion establecida.
 pub struct SessionHandler {
@@ -29,6 +46,10 @@ pub struct SessionHandler {
     monitors: MonitorLayout,
     active_monitor: u8,
     injector: Box<dyn InputInjector + Send>,
+    quality: QualityProfile,
+    clipboard: Box<dyn Clipboard>,
+    power: Box<dyn PowerControl>,
+    confirmations: SharedConfirmations,
     files: FileService,
     /// Descargas aceptadas que todavia no se han puesto en marcha.
     ///
@@ -73,6 +94,10 @@ impl SessionHandler {
             monitors,
             active_monitor,
             injector,
+            quality: QualityProfile::from_preset(QualityPreset::Equilibrado),
+            clipboard: default_clipboard(),
+            power: default_power(),
+            confirmations: SharedConfirmations::default(),
             // Sin carpetas declaradas no se comparte nada. Es el valor por
             // omision a proposito: el acceso al disco se concede, no se hereda
             // de tener permiso de archivos.
@@ -81,6 +106,59 @@ impl SessionHandler {
             applied: 0,
             refused: 0,
         }
+    }
+
+    /// Usa otro portapapeles en lugar del del sistema.
+    ///
+    /// Sirve para probar toda la logica del portapapeles en cualquier
+    /// plataforma: el de Windows solo existe en Windows.
+    #[must_use]
+    pub fn with_clipboard(mut self, clipboard: Box<dyn Clipboard>) -> Self {
+        self.clipboard = clipboard;
+        self
+    }
+
+    /// Usa otro backend de energia en lugar del del sistema.
+    ///
+    /// Sirve para probar que la confirmacion funciona sin apagar la maquina
+    /// donde corren las pruebas.
+    #[must_use]
+    pub fn with_power(mut self, power: Box<dyn PowerControl>) -> Self {
+        self.power = power;
+        self
+    }
+
+    /// Comparte la puerta de confirmaciones con el panel del host.
+    ///
+    /// Sin esto, la confirmacion la pide la sesion y **nadie puede
+    /// aprobarla**: la persona del PC no tendria donde decidir. Es la pieza
+    /// que conecta las dos mitades.
+    #[must_use]
+    pub fn with_confirmations(mut self, confirmations: SharedConfirmations) -> Self {
+        self.confirmations = confirmations;
+        self
+    }
+
+    /// La confirmacion que el panel del host tiene que mostrar, si la hay.
+    ///
+    /// Devuelve el identificador publico y el texto, nunca el token: el token
+    /// es de quien pidio la operacion, y si el panel lo manejara se podria
+    /// filtrar de vuelta a quien no debe tenerlo.
+    #[must_use]
+    pub fn pending_confirmation(&self) -> Option<Pending> {
+        self.confirmations.pending(Timestamp::now())
+    }
+
+    /// Una persona del PC aprueba la confirmacion pendiente.
+    ///
+    /// Devuelve `false` si el identificador no corresponde a ninguna viva.
+    pub fn approve_confirmation(&mut self, id: &str) -> bool {
+        self.confirmations.approve(id, Timestamp::now())
+    }
+
+    /// Una persona del PC rechaza la confirmacion pendiente.
+    pub fn refuse_confirmation(&mut self, id: &str) -> bool {
+        self.confirmations.refuse(id, Timestamp::now())
     }
 
     /// Declara las carpetas que esta sesion puede ver.
@@ -113,6 +191,15 @@ impl SessionHandler {
     #[must_use]
     pub fn active_transfers(&self) -> usize {
         self.files.active_count()
+    }
+
+    /// Perfil de calidad en uso.
+    ///
+    /// Lo pide el dispositivo y el host lo valida. Hoy solo se guarda: lo
+    /// aplicara la transmision de pantalla cuando exista.
+    #[must_use]
+    pub const fn quality(&self) -> QualityProfile {
+        self.quality
     }
 
     /// Monitor que se esta transmitiendo.
@@ -170,19 +257,17 @@ impl SessionHandler {
                 .map(Some);
         }
 
+        self.dispatch(request)
+    }
+
+    /// Ejecuta una orden cuyo permiso ya se comprobo.
+    ///
+    /// Esta separada de [`SessionHandler::handle`] para que la comprobacion
+    /// de permiso sea lo unico que haya antes del despacho: una orden solo
+    /// puede llegar aqui habiendo pasado por ella.
+    fn dispatch(&mut self, request: ControlRequest) -> HostResult<Option<String>> {
         match request {
-            ControlRequest::Input { event } => {
-                match resolve(&event, &self.monitors, self.active_monitor) {
-                    Ok(resolved) => match self.injector.inject(&resolved) {
-                        Ok(()) => {
-                            self.applied = self.applied.saturating_add(1);
-                            Ok(None)
-                        }
-                        Err(error) => self.deny("injection_failed", &error.to_string()).map(Some),
-                    },
-                    Err(error) => self.deny("invalid_input", &error.to_string()).map(Some),
-                }
-            }
+            ControlRequest::Input { event } => self.handle_input(&event),
             ControlRequest::ListMonitors => {
                 self.applied = self.applied.saturating_add(1);
                 Self::respond(ControlResponse::Monitors {
@@ -200,53 +285,84 @@ impl SessionHandler {
                         .map(Some)
                 }
             }
-            ControlRequest::ListDir { path, offset } => match self.files.list(&path, offset) {
-                Ok(response) => {
-                    self.applied = self.applied.saturating_add(1);
-                    Self::respond(response).map(Some)
-                }
-                Err(error) => self.refuse_file(&error).map(Some),
-            },
+            ControlRequest::ListDir { path, offset } => {
+                let hecho = self.files.list(&path, offset).map(Respuesta::Control);
+                self.answer_file(hecho)
+            }
             ControlRequest::DownloadStart { path } => {
-                match self.files.start_download(&path, Timestamp::now()) {
-                    Ok((response, download)) => {
-                        self.applied = self.applied.saturating_add(1);
+                let hecho = self.files.start_download(&path, Timestamp::now()).map(
+                    |(response, download)| {
                         // No se envia nada aqui: la descarga sale en su propia
                         // tarea para no dejar el raton esperando detras.
                         self.pending_downloads.push(download);
-                        Self::respond(response).map(Some)
-                    }
-                    Err(error) => self.refuse_file(&error).map(Some),
-                }
+                        Respuesta::Control(response)
+                    },
+                );
+                self.answer_file(hecho)
             }
             ControlRequest::UploadStart { path, size_bytes } => {
-                match self.files.start_upload(&path, size_bytes, Timestamp::now()) {
-                    Ok(response) => {
-                        self.applied = self.applied.saturating_add(1);
-                        Self::respond(response).map(Some)
-                    }
-                    Err(error) => self.refuse_file(&error).map(Some),
-                }
+                let hecho = self
+                    .files
+                    .start_upload(&path, size_bytes, Timestamp::now())
+                    .map(Respuesta::Control);
+                self.answer_file(hecho)
             }
             ControlRequest::TransferCancel { transfer_id } => {
-                match self.files.cancel(transfer_id, Timestamp::now()) {
-                    Ok(event) => {
+                let hecho = self
+                    .files
+                    .cancel(transfer_id, Timestamp::now())
+                    .map(Respuesta::Evento);
+                self.answer_file(hecho)
+            }
+            ControlRequest::Power {
+                action,
+                confirmation_token,
+            } => self.handle_power(action, confirmation_token.as_deref()),
+            ControlRequest::ClipboardGet => {
+                // El portapapeles del PC puede tener mucho mas de lo que cabe
+                // en un mensaje de control, asi que lo leido se comprueba
+                // igual que lo que llega de fuera.
+                let hecho = self
+                    .clipboard
+                    .read_text()
+                    .and_then(|texto| check_text(&texto).map(|()| texto))
+                    .map(|text| ControlResponse::ClipboardText { text });
+                self.answer_clipboard(hecho)
+            }
+            ControlRequest::ClipboardSet { text } => {
+                let hecho = self
+                    .clipboard
+                    .write_text(&text)
+                    .map(|()| ControlResponse::Ack);
+                self.answer_clipboard(hecho)
+            }
+            ControlRequest::SystemStatus => {
+                self.applied = self.applied.saturating_add(1);
+                Self::respond(ControlResponse::SystemStatus {
+                    status: crate::system::read_status(),
+                })
+                .map(Some)
+            }
+            ControlRequest::SetQuality { profile } => {
+                // Un cliente manipulado podria pedir 10 000 fotogramas o una
+                // tasa de bits absurda. Lo que llega por la red se valida
+                // siempre, aunque el cliente propio nunca enviaria eso.
+                match profile.validate() {
+                    Ok(()) => {
+                        self.quality = profile;
                         self.applied = self.applied.saturating_add(1);
-                        Self::event(event).map(Some)
+                        Self::respond(ControlResponse::Ack).map(Some)
                     }
-                    Err(error) => self.refuse_file(&error).map(Some),
+                    Err(error) => self.deny("invalid_quality", &error.to_string()).map(Some),
                 }
             }
-            // El resto del protocolo de control corresponde a la etapa 5. Se
-            // contesta que no esta disponible, que es la verdad, en lugar de
-            // callar y dejar al cliente esperando.
-            other => self
+            // La ultima que queda del protocolo de control. Se contesta que
+            // falta, que es la verdad, en lugar de aceptar una preferencia
+            // sobre un audio que todavia no se transmite.
+            ControlRequest::SetAudioEnabled { .. } => self
                 .deny(
                     "not_implemented",
-                    &format!(
-                        "la operacion de {} todavia no esta implementada en el host",
-                        operation_name(&other)
-                    ),
+                    "el host todavia no captura audio, asi que activarlo no haria nada",
                 )
                 .map(Some),
         }
@@ -299,6 +415,149 @@ impl SessionHandler {
     pub fn end(&mut self) {
         self.files.end(Timestamp::now());
         self.pending_downloads.clear();
+        // Una aprobacion no sobrevive a la sesion que la pidio: si la sesion
+        // se cae y vuelve, hay que volver a preguntar.
+        self.confirmations.clear();
+    }
+
+    /// Atiende una operacion de energia.
+    ///
+    /// Bloquear la sesion se hace sin mas: es reversible y no pierde nada.
+    /// Reiniciar y apagar exigen que una persona delante del PC lo apruebe, y
+    /// el token que se entrega aqui **no vale** hasta que eso ocurra.
+    fn handle_power(
+        &mut self,
+        action: PowerAction,
+        token: Option<&str>,
+    ) -> HostResult<Option<String>> {
+        if !action.requires_confirmation() {
+            return self.run_power(action);
+        }
+
+        let now = Timestamp::now();
+        let Some(token) = token else {
+            // Primera vez: se pide la confirmacion y se entrega el token. No
+            // se ejecuta nada, y la cuenta de ordenes aplicadas no sube:
+            // todavia no ha pasado nada en el equipo.
+            let pedido = self.confirmations.request(action, now);
+            return Self::respond(ControlResponse::ConfirmationRequired {
+                token: pedido.token,
+                prompt: pedido.prompt,
+            })
+            .map(Some);
+        };
+
+        match self.confirmations.redeem(action, token, now) {
+            Redeem::Execute => self.run_power(action),
+            Redeem::Waiting => self
+                .deny(
+                    "awaiting_confirmation",
+                    "falta que alguien lo apruebe en el equipo",
+                )
+                .map(Some),
+            Redeem::Refused => self
+                .deny("refused_at_host", "lo han rechazado en el equipo")
+                .map(Some),
+            Redeem::Invalid(motivo) => self.deny("invalid_confirmation", motivo).map(Some),
+        }
+    }
+
+    /// Ejecuta la operacion de energia de verdad.
+    fn run_power(&mut self, action: PowerAction) -> HostResult<Option<String>> {
+        match self.power.execute(action) {
+            Ok(()) => {
+                tracing::warn!(?action, "operacion de energia ejecutada");
+                self.applied = self.applied.saturating_add(1);
+                Self::respond(ControlResponse::Ack).map(Some)
+            }
+            Err(error) => {
+                let code = match error {
+                    PowerError::UnsupportedPlatform { .. } => "not_implemented",
+                    PowerError::PrivilegeDenied => "privilege_denied",
+                    PowerError::System(_) => "power_failed",
+                };
+                let message = match &error {
+                    PowerError::System(detalle) => {
+                        tracing::warn!(detalle, "la operacion de energia fallo");
+                        "el equipo no pudo completar la operacion".to_owned()
+                    }
+                    otro => otro.to_string(),
+                };
+                self.deny(code, &message).map(Some)
+            }
+        }
+    }
+
+    /// Traduce un evento de entrada a coordenadas reales y lo inyecta.
+    ///
+    /// Un evento valido no lleva respuesta: la pantalla ya es la respuesta.
+    /// Solo se contesta cuando algo falla, para que el otro extremo sepa por
+    /// que no se movio nada.
+    fn handle_input(&mut self, event: &InputEvent) -> HostResult<Option<String>> {
+        let resolved = match resolve(event, &self.monitors, self.active_monitor) {
+            Ok(resolved) => resolved,
+            Err(error) => return self.deny("invalid_input", &error.to_string()).map(Some),
+        };
+        match self.injector.inject(&resolved) {
+            Ok(()) => {
+                self.applied = self.applied.saturating_add(1);
+                Ok(None)
+            }
+            Err(error) => self.deny("injection_failed", &error.to_string()).map(Some),
+        }
+    }
+
+    /// Contesta a una operacion de archivos, sea respuesta o evento.
+    fn answer_file(
+        &mut self,
+        hecho: Result<Respuesta, nexus_file_transfer::error::FileError>,
+    ) -> HostResult<Option<String>> {
+        match hecho {
+            Ok(respuesta) => {
+                self.applied = self.applied.saturating_add(1);
+                match respuesta {
+                    Respuesta::Control(response) => Self::respond(response).map(Some),
+                    Respuesta::Evento(event) => Self::event(event).map(Some),
+                }
+            }
+            Err(error) => self.refuse_file(&error).map(Some),
+        }
+    }
+
+    /// Contesta a una operacion de portapapeles.
+    fn answer_clipboard(
+        &mut self,
+        hecho: nexus_clipboard::ClipboardResult<ControlResponse>,
+    ) -> HostResult<Option<String>> {
+        match hecho {
+            Ok(response) => {
+                self.applied = self.applied.saturating_add(1);
+                Self::respond(response).map(Some)
+            }
+            Err(error) => self.refuse_clipboard(&error).map(Some),
+        }
+    }
+
+    /// Rechaza una operacion de portapapeles con su codigo estable.
+    fn refuse_clipboard(&mut self, error: &ClipboardError) -> HostResult<String> {
+        let code = match error {
+            ClipboardError::TooLarge { .. } => "too_large",
+            ClipboardError::InteriorNul => "invalid_text",
+            ClipboardError::Empty => "clipboard_empty",
+            ClipboardError::Busy => "clipboard_busy",
+            ClipboardError::UnsupportedPlatform { .. } => "not_implemented",
+            ClipboardError::System(_) => "clipboard_failed",
+        };
+        // El mensaje del sistema se queda en el registro del host, no viaja:
+        // puede llevar detalles del equipo que quien pregunta no necesita.
+        let message = match error {
+            ClipboardError::System(detalle) => {
+                tracing::warn!(detalle, "el portapapeles del sistema fallo");
+                "el portapapeles del equipo no respondio".to_owned()
+            }
+            otro => otro.to_string(),
+        };
+        self.deny(code, &message)
     }
 
     /// Rechaza una operacion de archivos con su codigo estable.
@@ -335,20 +594,6 @@ impl SessionHandler {
         Envelope::at(Timestamp::now(), ControlMessage::Response(response))
             .encode()
             .map_err(|e| HostError::Protocol(e.to_string()))
-    }
-}
-
-/// Nombre estable de una operacion, para poder explicar que falta.
-const fn operation_name(request: &ControlRequest) -> &'static str {
-    match request {
-        ControlRequest::Input { .. } => "entrada",
-        ControlRequest::ListMonitors => "listar monitores",
-        ControlRequest::SelectMonitor { .. } => "seleccionar monitor",
-        ControlRequest::SetQuality { .. } => "cambiar calidad",
-        ControlRequest::ClipboardGet => "leer el portapapeles",
-        ControlRequest::ClipboardSet { .. } => "escribir el portapapeles",
-
-        _ => "esa",
     }
 }
 
@@ -581,6 +826,502 @@ mod tests {
         assert!(restos.is_empty(), "quedaron restos: {restos:?}");
     }
 
+    /// Manejador con un portapapeles en memoria que la prueba puede mirar.
+    fn probe_con_portapapeles(
+        permissions: PermissionSet,
+        inicial: Option<&str>,
+    ) -> (Probe, std::sync::Arc<std::sync::Mutex<Option<String>>>) {
+        let compartido = std::sync::Arc::new(std::sync::Mutex::new(
+            inicial.map(std::borrow::ToOwned::to_owned),
+        ));
+        let injector = SharedInjector::default();
+        let handler = SessionHandler::new(permissions, monitors(), Box::new(injector.clone()))
+            .with_clipboard(Box::new(PortapapelesCompartido(std::sync::Arc::clone(
+                &compartido,
+            ))));
+        (Probe { handler, injector }, compartido)
+    }
+
+    /// Portapapeles de prueba cuyo contenido vive fuera del manejador.
+    struct PortapapelesCompartido(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+    impl nexus_clipboard::Clipboard for PortapapelesCompartido {
+        fn name(&self) -> &'static str {
+            "compartido"
+        }
+
+        fn read_text(&mut self) -> nexus_clipboard::ClipboardResult<String> {
+            self.0
+                .lock()
+                .expect("sin envenenar")
+                .clone()
+                .ok_or(ClipboardError::Empty)
+        }
+
+        fn write_text(&mut self, text: &str) -> nexus_clipboard::ClipboardResult<()> {
+            check_text(text)?;
+            *self.0.lock().expect("sin envenenar") = Some(text.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lo_copiado_en_el_pc_llega_al_dispositivo() {
+        let (mut probe, _) =
+            probe_con_portapapeles(PermissionSet::standard(), Some("texto copiado en el PC"));
+        match probe.send(ControlRequest::ClipboardGet) {
+            Some(ControlResponse::ClipboardText { text }) => {
+                assert_eq!(text, "texto copiado en el PC");
+            }
+            otro => panic!("se esperaba el texto, llego {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn lo_copiado_en_el_dispositivo_llega_al_pc() {
+        let (mut probe, contenido) = probe_con_portapapeles(PermissionSet::standard(), None);
+        assert_eq!(
+            probe.send(ControlRequest::ClipboardSet {
+                text: "escrito desde el iPad".to_owned(),
+            }),
+            Some(ControlResponse::Ack)
+        );
+        assert_eq!(
+            contenido.lock().expect("sin envenenar").as_deref(),
+            Some("escrito desde el iPad")
+        );
+    }
+
+    #[test]
+    fn un_portapapeles_vacio_se_dice_en_lugar_de_devolver_cadena_vacia() {
+        // Una cadena vacia pareceria un portapapeles con un texto en blanco.
+        let (mut probe, _) = probe_con_portapapeles(PermissionSet::standard(), None);
+        match probe.send(ControlRequest::ClipboardGet) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "clipboard_empty");
+            }
+            otro => panic!("deberia decir que esta vacio, llego {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn un_texto_demasiado_grande_se_rechaza_en_las_dos_direcciones() {
+        let enorme = "x".repeat(nexus_clipboard::MAX_TEXT_BYTES + 1);
+
+        // Al escribir desde el dispositivo.
+        let (mut probe, contenido) = probe_con_portapapeles(PermissionSet::standard(), None);
+        match probe.send(ControlRequest::ClipboardSet {
+            text: enorme.clone(),
+        }) {
+            Some(ControlResponse::Denied { code, .. }) => assert_eq!(code, "too_large"),
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+        assert!(
+            contenido.lock().expect("sin envenenar").is_none(),
+            "un rechazo no debe tocar el portapapeles del PC"
+        );
+
+        // Y al leer del PC, que es el caso que de verdad sorprende: el
+        // portapapeles del equipo puede tener mucho mas de lo que cabe.
+        let (mut probe, _) = probe_con_portapapeles(PermissionSet::standard(), Some(&enorme));
+        match probe.send(ControlRequest::ClipboardGet) {
+            Some(ControlResponse::Denied { code, .. }) => assert_eq!(code, "too_large"),
+            otro => panic!("deberia rechazarse al leer, llego {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn un_texto_con_byte_cero_no_llega_al_portapapeles_del_pc() {
+        let (mut probe, contenido) = probe_con_portapapeles(PermissionSet::standard(), None);
+        match probe.send(ControlRequest::ClipboardSet {
+            text: "contrase\0na".to_owned(),
+        }) {
+            Some(ControlResponse::Denied { code, .. }) => assert_eq!(code, "invalid_text"),
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+        assert!(contenido.lock().expect("sin envenenar").is_none());
+    }
+
+    #[test]
+    fn sin_permiso_de_lectura_no_se_lee_el_portapapeles() {
+        let (mut probe, _) = probe_con_portapapeles(
+            PermissionSet::from_iter([Permission::ClipboardWrite]),
+            Some("secreto"),
+        );
+        match probe.send(ControlRequest::ClipboardGet) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "permission_denied");
+            }
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn sin_permiso_de_escritura_no_se_toca_el_portapapeles_del_pc() {
+        // El limite que importa: poder leer no da derecho a escribir.
+        let (mut probe, contenido) = probe_con_portapapeles(
+            PermissionSet::from_iter([Permission::ClipboardRead]),
+            Some("lo que habia"),
+        );
+        match probe.send(ControlRequest::ClipboardSet {
+            text: "intruso".to_owned(),
+        }) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "permission_denied");
+            }
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+        assert_eq!(
+            contenido.lock().expect("sin envenenar").as_deref(),
+            Some("lo que habia"),
+            "lo que ya estaba no debe cambiar"
+        );
+    }
+
+    #[test]
+    fn sin_portapapeles_en_esta_plataforma_se_dice_claramente() {
+        // El manejador por omision usa el del sistema, que en Linux no existe.
+        let mut probe = Probe::with(PermissionSet::standard());
+        match probe.send(ControlRequest::ClipboardGet) {
+            Some(ControlResponse::Denied { code, message }) => {
+                if cfg!(windows) {
+                    // En Windows si hay backend: el portapapeles puede estar
+                    // vacio, pero no «no implementado».
+                    assert_ne!(code, "not_implemented", "{message}");
+                } else {
+                    assert_eq!(code, "not_implemented");
+                }
+            }
+            otro if cfg!(windows) => {
+                // En Windows puede contestar con el texto de verdad.
+                assert!(matches!(otro, Some(ControlResponse::ClipboardText { .. })));
+            }
+            otro => panic!("deberia rechazarse fuera de Windows, llego {otro:?}"),
+        }
+    }
+
+    /// Manejador con un backend de energia que anota en lugar de apagar.
+    fn probe_con_energia(permissions: PermissionSet) -> (Probe, EnergiaCompartida) {
+        let energia = EnergiaCompartida::default();
+        let injector = SharedInjector::default();
+        let handler = SessionHandler::new(permissions, monitors(), Box::new(injector.clone()))
+            .with_power(Box::new(energia.clone()));
+        (Probe { handler, injector }, energia)
+    }
+
+    /// Backend de energia cuyo registro vive fuera del manejador.
+    #[derive(Clone, Default)]
+    struct EnergiaCompartida(Arc<Mutex<Vec<PowerAction>>>);
+
+    impl EnergiaCompartida {
+        fn ejecutadas(&self) -> Vec<PowerAction> {
+            self.0.lock().expect("sin envenenar").clone()
+        }
+    }
+
+    impl nexus_power::PowerControl for EnergiaCompartida {
+        fn name(&self) -> &'static str {
+            "compartido"
+        }
+
+        fn execute(&mut self, action: PowerAction) -> nexus_power::PowerResult<()> {
+            self.0.lock().expect("sin envenenar").push(action);
+            Ok(())
+        }
+    }
+
+    /// Pide una operacion de energia y devuelve lo que conteste el host.
+    fn pedir_energia(
+        probe: &mut Probe,
+        action: PowerAction,
+        token: Option<String>,
+    ) -> Option<ControlResponse> {
+        probe.send(ControlRequest::Power {
+            action,
+            confirmation_token: token,
+        })
+    }
+
+    #[test]
+    fn bloquear_la_sesion_no_necesita_confirmacion() {
+        // Es reversible y no pierde nada: pedir confirmacion para esto solo
+        // haria que la gente aprobara sin leer.
+        let (mut probe, energia) = probe_con_energia(PermissionSet::full());
+        assert_eq!(
+            pedir_energia(&mut probe, PowerAction::Lock, None),
+            Some(ControlResponse::Ack)
+        );
+        assert_eq!(energia.ejecutadas(), [PowerAction::Lock]);
+    }
+
+    #[test]
+    fn con_el_token_en_la_mano_pero_sin_aprobar_no_se_apaga_nada() {
+        // ESTA es la prueba que justifica todo el modulo de confirmacion.
+        // Quien pide recibe el token al instante; si eso bastara, la
+        // confirmacion no confirmaria nada.
+        let (mut probe, energia) = probe_con_energia(PermissionSet::full());
+
+        let token = match pedir_energia(&mut probe, PowerAction::Shutdown, None) {
+            Some(ControlResponse::ConfirmationRequired { token, prompt }) => {
+                assert!(prompt.contains("Apagar"), "{prompt}");
+                token
+            }
+            otro => panic!("se esperaba una confirmacion, llego {otro:?}"),
+        };
+
+        match pedir_energia(&mut probe, PowerAction::Shutdown, Some(token)) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "awaiting_confirmation");
+            }
+            otro => panic!("deberia seguir esperando, llego {otro:?}"),
+        }
+        assert!(
+            energia.ejecutadas().is_empty(),
+            "no debe haberse ejecutado nada: nadie lo aprobo"
+        );
+    }
+
+    #[test]
+    fn tras_aprobarlo_en_el_pc_el_apagado_se_ejecuta() {
+        let (mut probe, energia) = probe_con_energia(PermissionSet::full());
+
+        let token = match pedir_energia(&mut probe, PowerAction::Reboot, None) {
+            Some(ControlResponse::ConfirmationRequired { token, .. }) => token,
+            otro => panic!("se esperaba una confirmacion, llego {otro:?}"),
+        };
+
+        let id = probe
+            .handler
+            .pending_confirmation()
+            .expect("el panel deberia ver una pendiente")
+            .id
+            .clone();
+        assert!(probe.handler.approve_confirmation(&id));
+
+        assert_eq!(
+            pedir_energia(&mut probe, PowerAction::Reboot, Some(token)),
+            Some(ControlResponse::Ack)
+        );
+        assert_eq!(energia.ejecutadas(), [PowerAction::Reboot]);
+    }
+
+    #[test]
+    fn si_lo_rechazan_en_el_pc_no_se_apaga() {
+        let (mut probe, energia) = probe_con_energia(PermissionSet::full());
+        let token = match pedir_energia(&mut probe, PowerAction::Shutdown, None) {
+            Some(ControlResponse::ConfirmationRequired { token, .. }) => token,
+            otro => panic!("se esperaba una confirmacion, llego {otro:?}"),
+        };
+
+        let id = probe
+            .handler
+            .pending_confirmation()
+            .expect("hay una pendiente")
+            .id
+            .clone();
+        assert!(probe.handler.refuse_confirmation(&id));
+
+        match pedir_energia(&mut probe, PowerAction::Shutdown, Some(token)) {
+            Some(ControlResponse::Denied { code, .. }) => assert_eq!(code, "refused_at_host"),
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+        assert!(energia.ejecutadas().is_empty());
+    }
+
+    #[test]
+    fn un_token_inventado_no_apaga_el_equipo() {
+        let (mut probe, energia) = probe_con_energia(PermissionSet::full());
+        pedir_energia(&mut probe, PowerAction::Shutdown, None);
+        let id = probe
+            .handler
+            .pending_confirmation()
+            .expect("hay una")
+            .id
+            .clone();
+        probe.handler.approve_confirmation(&id);
+
+        for falso in ["", "0", &"f".repeat(64)] {
+            match pedir_energia(&mut probe, PowerAction::Shutdown, Some(falso.to_owned())) {
+                Some(ControlResponse::Denied { code, .. }) => {
+                    assert_eq!(code, "invalid_confirmation", "{falso:?}");
+                }
+                otro => panic!("{falso:?} no deberia valer, llego {otro:?}"),
+            }
+        }
+        assert!(energia.ejecutadas().is_empty());
+    }
+
+    #[test]
+    fn la_confirmacion_de_un_reinicio_no_sirve_para_apagar() {
+        let (mut probe, energia) = probe_con_energia(PermissionSet::full());
+        let token = match pedir_energia(&mut probe, PowerAction::Reboot, None) {
+            Some(ControlResponse::ConfirmationRequired { token, .. }) => token,
+            otro => panic!("se esperaba una confirmacion, llego {otro:?}"),
+        };
+        let id = probe
+            .handler
+            .pending_confirmation()
+            .expect("hay una")
+            .id
+            .clone();
+        probe.handler.approve_confirmation(&id);
+
+        match pedir_energia(&mut probe, PowerAction::Shutdown, Some(token)) {
+            Some(ControlResponse::Denied { code, .. }) => assert_eq!(code, "invalid_confirmation"),
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+        assert!(energia.ejecutadas().is_empty());
+    }
+
+    #[test]
+    fn sin_permiso_no_se_apaga_aunque_se_apruebe() {
+        // El permiso se comprueba antes que nada: sin el, ni siquiera se
+        // llega a crear una confirmacion que alguien pudiera aprobar.
+        let (mut probe, energia) = probe_con_energia(PermissionSet::standard());
+        match pedir_energia(&mut probe, PowerAction::Shutdown, None) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "permission_denied");
+            }
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+        assert!(
+            probe.handler.pending_confirmation().is_none(),
+            "no debe aparecer nada en el panel del host"
+        );
+        assert!(energia.ejecutadas().is_empty());
+    }
+
+    #[test]
+    fn cerrar_la_sesion_invalida_una_aprobacion_pendiente() {
+        let (mut probe, energia) = probe_con_energia(PermissionSet::full());
+        let token = match pedir_energia(&mut probe, PowerAction::Shutdown, None) {
+            Some(ControlResponse::ConfirmationRequired { token, .. }) => token,
+            otro => panic!("se esperaba una confirmacion, llego {otro:?}"),
+        };
+        let id = probe
+            .handler
+            .pending_confirmation()
+            .expect("hay una")
+            .id
+            .clone();
+        probe.handler.approve_confirmation(&id);
+
+        probe.handler.end();
+
+        match pedir_energia(&mut probe, PowerAction::Shutdown, Some(token)) {
+            Some(ControlResponse::Denied { code, .. }) => assert_eq!(code, "invalid_confirmation"),
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+        assert!(energia.ejecutadas().is_empty());
+    }
+
+    #[test]
+    fn insistir_no_llena_el_panel_de_avisos() {
+        let (mut probe, _) = probe_con_energia(PermissionSet::full());
+        let primero = match pedir_energia(&mut probe, PowerAction::Reboot, None) {
+            Some(ControlResponse::ConfirmationRequired { token, .. }) => token,
+            otro => panic!("llego {otro:?}"),
+        };
+        let segundo = match pedir_energia(&mut probe, PowerAction::Reboot, None) {
+            Some(ControlResponse::ConfirmationRequired { token, .. }) => token,
+            otro => panic!("llego {otro:?}"),
+        };
+        assert_eq!(primero, segundo, "deberia ser la misma confirmacion");
+    }
+
+    #[test]
+    fn el_estado_del_equipo_son_datos_de_verdad() {
+        let mut probe = Probe::with(PermissionSet::standard());
+        match probe.send(ControlRequest::SystemStatus) {
+            Some(ControlResponse::SystemStatus { status }) => {
+                assert!(!status.hostname.is_empty());
+                assert!(!status.os_description.is_empty());
+                assert!(status.cpu_cores >= 1);
+                assert!(status.memory_total_mib > 0, "la memoria no puede ser cero");
+                assert!(status.memory_available_mib <= status.memory_total_mib);
+                assert!(
+                    status.session_locked.is_none(),
+                    "mientras no se detecte, debe decir que no se sabe"
+                );
+            }
+            otro => panic!("se esperaba el estado del equipo, llego {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn sin_permiso_de_informacion_no_se_da_el_estado_del_equipo() {
+        let mut probe = Probe::with(PermissionSet::from_iter([Permission::ViewScreen]));
+        match probe.send(ControlRequest::SystemStatus) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "permission_denied");
+            }
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn un_perfil_de_calidad_valido_se_acepta_y_se_guarda() {
+        let mut probe = Probe::with(PermissionSet::standard());
+        let nitido = QualityProfile::from_preset(QualityPreset::Nitido);
+        assert_eq!(
+            probe.send(ControlRequest::SetQuality { profile: nitido }),
+            Some(ControlResponse::Ack)
+        );
+        assert_eq!(probe.handler.quality(), nitido);
+    }
+
+    #[test]
+    fn un_perfil_de_calidad_imposible_se_rechaza_y_no_cambia_nada() {
+        // El caso que importa: un cliente manipulado pidiendo algo absurdo.
+        let mut probe = Probe::with(PermissionSet::standard());
+        let antes = probe.handler.quality();
+
+        for profile in [
+            QualityProfile {
+                target_fps: 10_000,
+                ..QualityProfile::from_preset(QualityPreset::Equilibrado)
+            },
+            QualityProfile {
+                target_bitrate_kbps: u32::MAX,
+                ..QualityProfile::from_preset(QualityPreset::Equilibrado)
+            },
+            QualityProfile {
+                scale_percent: 0,
+                ..QualityProfile::from_preset(QualityPreset::Equilibrado)
+            },
+            QualityProfile {
+                target_fps: 0,
+                ..QualityProfile::from_preset(QualityPreset::Equilibrado)
+            },
+        ] {
+            match probe.send(ControlRequest::SetQuality { profile }) {
+                Some(ControlResponse::Denied { code, message }) => {
+                    assert_eq!(code, "invalid_quality");
+                    assert!(!message.is_empty(), "deberia decir que campo falla");
+                }
+                otro => panic!("{profile:?} deberia rechazarse, llego {otro:?}"),
+            }
+        }
+        assert_eq!(
+            probe.handler.quality(),
+            antes,
+            "un perfil rechazado no debe cambiar el que estaba en uso"
+        );
+    }
+
+    #[test]
+    fn sin_permiso_de_pantalla_no_se_cambia_la_calidad() {
+        let mut probe = Probe::with(PermissionSet::from_iter([Permission::SystemInfo]));
+        match probe.send(ControlRequest::SetQuality {
+            profile: QualityProfile::from_preset(QualityPreset::Fluido),
+        }) {
+            Some(ControlResponse::Denied { code, .. }) => {
+                assert_eq!(code, "permission_denied");
+            }
+            otro => panic!("deberia rechazarse, llego {otro:?}"),
+        }
+    }
+
     #[test]
     fn un_manejador_recien_creado_no_comparte_ninguna_carpeta() {
         // El valor por omision: tener el permiso no abre el disco.
@@ -689,16 +1430,17 @@ mod tests {
     }
 
     #[test]
-    fn una_operacion_de_la_etapa_5_se_declara_pendiente_en_lugar_de_callar() {
+    fn una_operacion_que_falta_se_declara_pendiente_en_lugar_de_callar() {
+        // El audio sigue sin motor, asi que se dice. Cuando se implemente,
+        // esta prueba tendra que apuntar a otra cosa, o desaparecer porque ya
+        // no quede ninguna.
         let mut probe = Probe::with(PermissionSet::full());
-        match probe.send(ControlRequest::SetQuality {
-            profile: QualityProfile::from_preset(QualityPreset::Equilibrado),
-        }) {
+        match probe.send(ControlRequest::SetAudioEnabled { enabled: true }) {
             Some(ControlResponse::Denied { code, message }) => {
                 assert_eq!(code, "not_implemented");
                 assert!(
-                    message.contains("todavia no esta implementada"),
-                    "el cliente tiene que saber que falta: {message}"
+                    message.contains("audio"),
+                    "el cliente tiene que saber que falta y por que: {message}"
                 );
             }
             other => panic!("deberia contestar que falta, llego {other:?}"),

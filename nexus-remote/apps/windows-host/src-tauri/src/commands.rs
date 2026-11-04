@@ -43,6 +43,12 @@ pub struct AppState {
     pub host: std::sync::Arc<Mutex<HostService>>,
     /// Bucle del host, si esta en marcha.
     pub runtime: Mutex<Option<crate::supervisor::RuntimeHandle>>,
+    /// Confirmaciones pendientes, compartidas con la sesion en curso.
+    ///
+    /// Vive aqui y no dentro del bucle porque las dos mitades de una
+    /// confirmacion ocurren en sitios distintos: la pide el dispositivo
+    /// remoto y la aprueba una persona en esta ventana.
+    pub confirmations: crate::confirmation::SharedConfirmations,
 }
 
 impl AppState {
@@ -52,6 +58,7 @@ impl AppState {
         Self {
             host: std::sync::Arc::new(Mutex::new(host)),
             runtime: Mutex::new(None),
+            confirmations: crate::confirmation::SharedConfirmations::new(),
         }
     }
 }
@@ -471,7 +478,7 @@ fn comunicacion() -> Vec<FeatureStatus> {
 /// prueba moviendo archivos de verdad por el canal cifrado. Las demas siguen
 /// esperando.
 fn funciones_avanzadas() -> Vec<FeatureStatus> {
-    use FeatureState::{Pending, Working};
+    use FeatureState::{Pending, Unverified, Working};
 
     vec![
         FeatureStatus {
@@ -502,16 +509,24 @@ fn funciones_avanzadas() -> Vec<FeatureStatus> {
         FeatureStatus {
             key: "clipboard",
             label: "Portapapeles compartido",
-            state: Pending,
+            // Nivel 2 del ADR-0007: los limites y los permisos se prueban
+            // ejecutandolos, pero las llamadas al portapapeles de Win32 solo
+            // se han compilado en cruce, nunca ejecutado en Windows.
+            state: Unverified,
             stage: 5,
-            detail: "Protocolo y permisos definidos; falta leer y escribir el portapapeles de Windows.",
+            detail: "Leer y escribir el portapapeles funciona; un texto que no quepa se rechaza en lugar de recortarse. Falta ejecutarlo en Windows.",
         },
         FeatureStatus {
             key: "power",
             label: "Bloquear, reiniciar y apagar",
-            state: Pending,
+            // Nivel 2 del ADR-0007 por las llamadas al sistema. Lo que decide
+            // si se llega a ellas —el permiso y la confirmacion de una
+            // persona— si se prueba ejecutandolo, y a fondo: una prueba
+            // comprueba que con el token en la mano, sin aprobacion, no se
+            // apaga nada.
+            state: Unverified,
             stage: 5,
-            detail: "Permisos y confirmacion definidos; faltan las llamadas al sistema.",
+            detail: "Reiniciar y apagar exigen que alguien lo apruebe en este PC: el token que recibe quien lo pide no vale hasta entonces. Faltan ejecutar las llamadas al sistema en Windows.",
         },
     ]
 }
@@ -639,7 +654,8 @@ pub fn start_host(
         ))),
         std::sync::Arc::new(crate::runtime::PlatformInjectors),
         events,
-    );
+    )
+    .with_confirmations(state.confirmations.clone());
 
     let compartido = std::sync::Arc::clone(&state.host);
     let estado = std::sync::Arc::clone(&status);
@@ -793,6 +809,61 @@ pub fn shared_folders(state: tauri::State<'_, AppState>) -> CmdResult<Vec<Shared
             })
             .collect())
     })
+}
+
+/// Una confirmacion que espera a que alguien decida en este PC.
+#[derive(Debug, Serialize)]
+pub struct PendingConfirmation {
+    /// Identificador publico, el que se devuelve al aprobar o rechazar.
+    pub id: String,
+    /// Que se va a hacer, en lenguaje llano.
+    pub prompt: String,
+    /// Codigo estable de la operacion.
+    pub action: String,
+    /// Cuando se pidio, en milisegundos desde la epoca.
+    pub requested_at_ms: u64,
+}
+
+/// Lee la confirmacion pendiente, si la hay.
+///
+/// El panel la consulta para poder mostrarla. Nunca devuelve el token: ese es
+/// de quien pidio la operacion, y el panel no lo necesita para nada.
+#[tauri::command]
+#[must_use]
+pub fn pending_confirmation(state: tauri::State<'_, AppState>) -> Option<PendingConfirmation> {
+    state
+        .confirmations
+        .pending(nexus_core::Timestamp::now())
+        .map(|p| PendingConfirmation {
+            id: p.id,
+            prompt: p.prompt,
+            action: p.action.required_permission().name().to_owned(),
+            requested_at_ms: p.created_at.0,
+        })
+}
+
+/// Una persona de este PC aprueba la operacion.
+///
+/// Devuelve `false` si el identificador ya no corresponde a ninguna viva, que
+/// es lo que pasa si caduco o si el dispositivo cerro la sesion mientras
+/// tanto.
+#[tauri::command]
+pub fn approve_confirmation(state: tauri::State<'_, AppState>, id: String) -> bool {
+    let aprobada = state
+        .confirmations
+        .approve(&id, nexus_core::Timestamp::now());
+    if aprobada {
+        tracing::warn!(%id, "una persona aprobo una operacion de energia en el host");
+    }
+    aprobada
+}
+
+/// Una persona de este PC rechaza la operacion.
+#[tauri::command]
+pub fn refuse_confirmation(state: tauri::State<'_, AppState>, id: String) -> bool {
+    state
+        .confirmations
+        .refuse(&id, nexus_core::Timestamp::now())
 }
 
 /// Devuelve las sesiones mas recientes del historial.

@@ -34,7 +34,7 @@ export interface SystemStatus {
   memory_total_mib: number;
   memory_available_mib: number;
   uptime_secs: number;
-  session_locked: boolean;
+  session_locked: boolean | null;
 }
 
 export interface DeviceSummary {
@@ -118,6 +118,20 @@ export interface SharedFolder {
   label: string;
   path: string;
   writable: boolean;
+}
+
+/**
+ * Una operacion que espera a que alguien decida en este PC.
+ *
+ * Reiniciar y apagar no se hacen porque el dispositivo remoto lo pida: hace
+ * falta que una persona delante del equipo lo apruebe aqui. El token que
+ * recibio quien lo pidio no vale hasta entonces.
+ */
+export interface PendingConfirmation {
+  id: string;
+  prompt: string;
+  action: string;
+  requested_at_ms: number;
 }
 
 /** Como se expone este equipo a la red. */
@@ -438,6 +452,20 @@ export const api = {
     publicEndpoint: string | null,
   ): Promise<void> {
     return call<void>("set_network_exposure", { udpPort, publicEndpoint });
+  },
+
+  async pendingConfirmation(): Promise<PendingConfirmation | null> {
+    return call<PendingConfirmation | null>("pending_confirmation");
+  },
+
+  /** Aprueba la operacion. Devuelve false si ya no estaba viva. */
+  async approveConfirmation(id: string): Promise<boolean> {
+    return call<boolean>("approve_confirmation", { id });
+  },
+
+  /** La rechaza. */
+  async refuseConfirmation(id: string): Promise<boolean> {
+    return call<boolean>("refuse_confirmation", { id });
   },
 
   async sharedFolders(): Promise<SharedFolder[]> {

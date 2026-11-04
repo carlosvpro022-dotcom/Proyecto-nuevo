@@ -63,7 +63,10 @@ const MIME = {
 
 /** Pantallas a recorrer, con el texto que las identifica en la barra lateral. */
 const VIEWS = [
-  { id: "dashboard", nav: "Panel", expect: "Este equipo" },
+  // El aviso de confirmacion se dibuja encima de cualquier pantalla, asi que
+  // se comprueba en la primera: si no aparece, nadie podria aprobar un
+  // apagado y la confirmacion se quedaria esperando para siempre.
+  { id: "dashboard", nav: "Panel", expect: "Un dispositivo remoto pide permiso" },
   { id: "devices", nav: "Mis dispositivos", expect: "Dispositivos autorizados" },
   { id: "pairing", nav: "Conexion remota", expect: "Codigo de emparejamiento activo" },
   { id: "desktop", nav: "Escritorio remoto", expect: "Motor de escritorio remoto" },

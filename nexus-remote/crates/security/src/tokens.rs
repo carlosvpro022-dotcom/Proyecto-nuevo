@@ -13,8 +13,37 @@
 //! No hay criptografia propia en esto: son `SHA-256` de `sha2` y la comparacion
 //! en tiempo constante de `subtle`.
 
+use rand::rngs::SysRng;
+use rand_core::TryRng;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+
+/// Bytes de entropia de un secreto generado aqui.
+///
+/// 32 bytes son 256 bits: muy por encima de lo que se puede adivinar probando,
+/// y es lo mismo que usan las claves de este proyecto.
+pub const SECRET_BYTES: usize = 32;
+
+/// Genera un secreto nuevo con entropia del sistema operativo.
+///
+/// Se devuelve en hexadecimal para que viaje por un protocolo de texto sin
+/// codificaciones intermedias.
+///
+/// No hay generador propio: la entropia la da el sistema, a traves de `rand`.
+///
+/// # Panics
+///
+/// Si el generador del sistema operativo falla. Sin entropia no se puede
+/// emitir un secreto, y seguir adelante con uno predecible seria peor que
+/// parar.
+#[must_use]
+pub fn generate_secret() -> String {
+    let mut raw = [0_u8; SECRET_BYTES];
+    SysRng
+        .try_fill_bytes(&mut raw)
+        .expect("el generador del sistema operativo debe estar disponible");
+    hex::encode(raw)
+}
 
 /// Indica si los dos secretos coinciden, sin filtrar por tiempo cual era.
 ///
@@ -34,6 +63,26 @@ pub fn secret_matches(expected: &str, presented: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_generated_secrets_are_different() {
+        let a = generate_secret();
+        let b = generate_secret();
+        assert_ne!(a, b, "dos secretos seguidos no pueden coincidir");
+        assert_eq!(
+            a.len(),
+            SECRET_BYTES * 2,
+            "hexadecimal: dos letras por byte"
+        );
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_generated_secret_matches_itself_and_nothing_else() {
+        let secret = generate_secret();
+        assert!(secret_matches(&secret, &secret));
+        assert!(!secret_matches(&secret, &generate_secret()));
+    }
 
     #[test]
     fn the_same_secret_matches() {

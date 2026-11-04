@@ -80,6 +80,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nexus_file_transfer::SharedRoot::writable("Intercambio", &escritura),
     ])?;
 
+    // Una confirmacion pendiente de verdad, pedida a traves de la misma puerta
+    // que usa el bucle del host. Asi la verificacion del panel comprueba que
+    // el aviso se dibuja: sin aviso, nadie podria aprobar un apagado y la
+    // confirmacion se quedaria esperando para siempre.
+    let puerta = nexus_windows_host::confirmation::SharedConfirmations::new();
+    puerta.request(
+        nexus_core::protocol::control::PowerAction::Shutdown,
+        Timestamp::now(),
+    );
+    let confirmacion = puerta.pending(Timestamp::now()).map(|p| {
+        serde_json::json!({
+            "id": p.id,
+            "prompt": p.prompt,
+            "action": "shutdown",
+            "requested_at_ms": p.created_at.0,
+        })
+    });
+
     let devices: Vec<_> = host.list_devices()?.into_iter().map(to_summary).collect();
     let summary = build_host_summary(&mut host)?;
 
@@ -101,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "udp_port": host.network_exposure()?.0,
             "public_endpoint": host.network_exposure()?.1,
         },
+        "pending_confirmation": confirmacion,
         "shared_folders": host
             .shared_roots()?
             .into_iter()

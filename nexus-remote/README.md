@@ -24,6 +24,8 @@ entorno real**, y lo que todavía no existe.
 | **Lista de autorizados** | SQLite con permisos por dispositivo, revocación, borrado e historial de sesiones. |
 | **Límite de intentos** | Bloqueo progresivo por dispositivo. Esperar a que expire no reinicia la escalada. |
 | **Restricción de acceso al disco** | Solo las carpetas declaradas. Rechaza recorrido de directorios, enlaces que escapan y nombres reservados de Windows. |
+| **Confirmación en el PC para apagar** | Reiniciar y apagar no se hacen porque el dispositivo lo pida: el token que recibe quien lo pide **no vale** hasta que alguien lo apruebe en esta ventana. Un solo uso, caduca en dos minutos y muere con la sesión ([ADR-0013](docs/architecture/ADR-0013-confirmacion-en-el-host.md)). La decisión está probada; la llamada que apaga de verdad, no (abajo). |
+| **Límites del portapapeles** | Un texto que no quepa en el canal se rechaza en lugar de recortarse: medio comando o media contraseña con aspecto de estar completos es peor que un error. Leer y escribir el portapapeles de Windows está abajo. |
 | **Transferencia de archivos** | Listar, descargar y subir, por un canal binario propio. Un archivo subido se escribe aparte y solo aparece en su ruta cuando su contenido coincide con su `SHA-256`: si la sesión se corta, no queda nada a medias. Comprobado moviendo un archivo de varios trozos por un canal WebRTC real y verificando que llega idéntico ([ADR-0012](docs/architecture/ADR-0012-transferencia-de-archivos.md)). |
 | **Servidor de señalización** | `/v1/signaling` completo: autenticación Ed25519 del dispositivo, directorio de identidades con testigo de alta, límite de intentos por dispositivo y por origen, enrutado entre los dos extremos, registro de conexiones. |
 | **Conexión cifrada entre dispositivos** | WebRTC de verdad: ICE encuentra camino, DTLS cifra y los canales `control` e `input` transportan órdenes. Comprobado de extremo a extremo: un toque enviado por un par llega al otro y se aplica. |
@@ -47,6 +49,8 @@ Windows**, así que el comportamiento está sin comprobar.
 | **Detección de monitores** | `EnumDisplayMonitors`, `GetMonitorInfoW`, `GetDpiForMonitor` y `EnumDisplaySettingsW`. Devuelve resolución, posición, escala, refresco y cuál es la principal. |
 | **Captura de pantalla** | Windows Graphics Capture sobre Direct3D 11: cola de fotogramas sin hilo propio, copia a textura de preparación y lectura BGRA. Rehace la cola al cambiar la resolución y recupera el fotograma a la cola pase lo que pase. |
 | **Control de ratón y teclado** | `SendInput` con coordenadas absolutas sobre el escritorio virtual, tabla de ~110 teclas con su marca de extendida, texto por `KEYEVENTF_UNICODE` (pares subrogados incluidos) y liberación de todo al cerrar. |
+| **Portapapeles de Windows** | `OpenClipboard`/`GetClipboardData`/`SetClipboardData` con `CF_UNICODETEXT`. Resueltas las tres trampas de esa API: cerrarlo siempre (desde un `Drop`), que `GlobalUnlock` devuelva falso cuando acierta, y que quien escribe deje de ser el dueño de la memoria. |
+| **Bloquear, reiniciar y apagar** | `LockWorkStation` y `ExitWindowsEx`, activando antes `SeShutdownPrivilege`. Se comprueba `GetLastError` porque `AdjustTokenPrivileges` devuelve éxito aunque no haya podido activarlo. No se fuerza el cierre de programas con trabajo sin guardar. |
 
 Lo que **sí** está probado de esa etapa es la parte portable, que es donde
 están los errores difíciles: la tabla de teclas, la aritmética de coordenadas
@@ -67,7 +71,7 @@ Hace falta desplegar el servidor.
 | Emparejar desde fuera de la red local | 3 | El servidor lo rechaza a propósito: el código tiene unos 40 bits y viajaría en claro por él. Falta enviar un verificador Argon2id y confirmar la huella en el host ([ADR-0010](docs/architecture/ADR-0010-emparejamiento-por-red.md)). Mientras, se empareja en la red local. |
 | Cliente de iPhone y iPad | 4 | El proyecto entero. **Hace falta un Mac con Xcode.** |
 | Transmisión de la pantalla | 5 | La captura existe y la conexión existe; falta codificar los fotogramas y enviarlos por una pista de medios. |
-| Audio, portapapeles, administración | 5 | Las llamadas al sistema. Protocolo, permisos y contabilidad están listos. |
+| Audio del sistema | 5 | La captura WASAPI en modo bucle. El formato y el control de volumen están listos. |
 | Cifrado de la clave del host con DPAPI | 6 | Hoy la clave privada está en un archivo sin cifrar. |
 
 El panel refleja esta misma distinción con tres estados —*Probado*, *Sin

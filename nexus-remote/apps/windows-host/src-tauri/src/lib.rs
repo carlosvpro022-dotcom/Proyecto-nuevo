@@ -28,6 +28,7 @@
 
 pub mod admission;
 pub mod commands;
+pub mod confirmation;
 pub mod error;
 pub mod files;
 pub mod host;
@@ -98,6 +99,9 @@ pub fn run() {
             commands::network_exposure,
             commands::set_shared_folders,
             commands::shared_folders,
+            commands::pending_confirmation,
+            commands::approve_confirmation,
+            commands::refuse_confirmation,
             commands::feature_matrix,
             commands::permission_catalog,
         ])

@@ -18,9 +18,11 @@ path = "src/main.rs"
 
 [dependencies]
 nexus-capture = { version = "0.1.0", path = "../../../crates/capture" }
+nexus-clipboard = { version = "0.1.0", path = "../../../crates/clipboard" }
 nexus-core = { version = "0.1.0", path = "../../../crates/core" }
 nexus-file-transfer = { version = "0.1.0", path = "../../../crates/file-transfer" }
 nexus-input = { version = "0.1.0", path = "../../../crates/input" }
+nexus-power = { version = "0.1.0", path = "../../../crates/power" }
 nexus-security = { version = "0.1.0", path = "../../../crates/security" }
 nexus-transport = { version = "0.1.0", path = "../../../crates/transport" }
 rusqlite = { version = "0.41.1", features = ["bundled"] }

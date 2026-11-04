@@ -107,8 +107,14 @@ pub struct SystemStatus {
     pub memory_available_mib: u64,
     /// Tiempo encendido en segundos.
     pub uptime_secs: u64,
-    /// Si la sesion de Windows esta bloqueada.
-    pub session_locked: bool,
+    /// Si la sesion de Windows esta bloqueada, cuando se puede saber.
+    ///
+    /// Es opcional a proposito. Un `bool` obligaria a elegir entre `true` y
+    /// `false` tambien cuando el host no tiene forma de averiguarlo, y
+    /// contestar «no esta bloqueada» sin saberlo seria inventarse el dato.
+    /// `None` significa que no se sabe.
+    #[serde(default)]
+    pub session_locked: Option<bool>,
 }
 
 /// Peticion del controlador al host.

@@ -2547,6 +2547,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-clipboard"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "nexus-core"
 version = "0.1.0"
 dependencies = [
@@ -2597,6 +2606,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
+name = "nexus-power"
+version = "0.1.0"
+dependencies = [
+ "nexus-core",
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -2664,9 +2683,11 @@ name = "nexus-windows-host"
 version = "0.1.0"
 dependencies = [
  "nexus-capture",
+ "nexus-clipboard",
  "nexus-core",
  "nexus-file-transfer",
  "nexus-input",
+ "nexus-power",
  "nexus-security",
  "nexus-transport",
  "rusqlite",

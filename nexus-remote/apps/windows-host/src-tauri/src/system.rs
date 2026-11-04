@@ -13,8 +13,10 @@ use sysinfo::System;
 
 /// Lee el estado actual del equipo.
 ///
-/// `session_locked` siempre es `false`: detectar el bloqueo de la sesion de
-/// Windows es trabajo de la etapa 5 y no se finge aqui.
+/// `session_locked` queda en `None`: averiguar si la sesion de Windows esta
+/// bloqueada exige llamadas al sistema que no se pueden comprobar fuera de
+/// Windows, y devolver «no esta bloqueada» sin saberlo seria inventarse el
+/// dato. Cuando se implemente, se comprueba en un PC con Windows primero.
 #[must_use]
 pub fn read_status() -> SystemStatus {
     let mut system = System::new();
@@ -27,7 +29,7 @@ pub fn read_status() -> SystemStatus {
         memory_total_mib: system.total_memory() / (1024 * 1024),
         memory_available_mib: system.available_memory() / (1024 * 1024),
         uptime_secs: System::uptime(),
-        session_locked: false,
+        session_locked: None,
     }
 }
 
@@ -101,8 +103,8 @@ mod tests {
         // Esta prueba documenta una limitacion conocida: cuando se implemente
         // la deteccion (etapa 5) habra que cambiarla.
         assert!(
-            !read_status().session_locked,
-            "mientras no se implemente, el campo debe ser false y no un valor inventado"
+            read_status().session_locked.is_none(),
+            "mientras no se implemente, el campo debe decir que no se sabe, no inventarse un valor"
         );
     }
 }

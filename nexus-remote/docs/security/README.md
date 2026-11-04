@@ -7,6 +7,7 @@
 | Qué protege el sistema y por qué así | [ADR-0004](../architecture/ADR-0004-identidad-criptografica.md) |
 | Qué ve y qué no ve el servidor | [ADR-0003](../architecture/ADR-0003-transporte-webrtc.md) |
 | A qué parte del disco puede llegar un dispositivo | [ADR-0012](../architecture/ADR-0012-transferencia-de-archivos.md) |
+| Por qué apagar el PC exige que alguien esté delante | [ADR-0013](../architecture/ADR-0013-confirmacion-en-el-host.md) |
 | Cómo se endurece el despliegue | [guía de despliegue, §10](../deployment/despliegue.md) |
 | Estado actual, medida a medida | Pantalla **Seguridad** del panel del host |
 

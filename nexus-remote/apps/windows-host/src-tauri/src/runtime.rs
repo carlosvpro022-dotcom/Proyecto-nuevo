@@ -46,6 +46,7 @@ use nexus_transport::{LinkEvent, LinkState, SignalingLink, TransportError};
 use tokio::sync::mpsc;
 
 use crate::admission::{self, Decision};
+use crate::confirmation::SharedConfirmations;
 use crate::files::{Download, TransferOutcome, TransferReport};
 use crate::session::SessionHandler;
 
@@ -179,6 +180,11 @@ pub struct HostRuntime {
     lookup: Arc<dyn DeviceLookup>,
     injectors: Arc<dyn InjectorSource>,
     events: mpsc::Sender<RuntimeEvent>,
+    /// Puerta de confirmaciones compartida con el panel del host.
+    ///
+    /// Sin compartirla, una sesion podria pedir confirmacion para apagar y
+    /// nadie tendria donde aprobarla.
+    confirmations: SharedConfirmations,
     link: SignalingLink,
 }
 
@@ -207,8 +213,16 @@ impl HostRuntime {
             lookup,
             injectors,
             events,
+            confirmations: SharedConfirmations::new(),
             link: SignalingLink::new(),
         }
+    }
+
+    /// Comparte la puerta de confirmaciones con el panel del host.
+    #[must_use]
+    pub fn with_confirmations(mut self, confirmations: SharedConfirmations) -> Self {
+        self.confirmations = confirmations;
+        self
     }
 
     /// Estado del enlace con el servidor.
@@ -518,7 +532,8 @@ impl HostRuntime {
                         self.config.monitors.clone(),
                         self.injectors.create(),
                     )
-                    .with_shared_folders(AccessPolicy::new(self.config.shared_roots.clone())),
+                    .with_shared_folders(AccessPolicy::new(self.config.shared_roots.clone()))
+                    .with_confirmations(self.confirmations.clone()),
                 );
                 self.emit(RuntimeEvent::SessionStarted {
                     session_id,

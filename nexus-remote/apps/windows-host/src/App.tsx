@@ -22,6 +22,7 @@ import {
   type PermissionEntry,
   type PermissionProfile,
   type NetworkExposure,
+  type PendingConfirmation,
   type SharedFolder,
   type RuntimeStatus,
   type SessionRow,
@@ -29,7 +30,7 @@ import {
   type SystemStatus,
 } from "./api";
 import { Shell, type NavEntry } from "./components/Shell";
-import { Card, Notice, Pill, Spinner } from "./components/ui";
+import { Card, ConfirmationBanner, Notice, Pill, Spinner } from "./components/ui";
 import { Dashboard } from "./views/Dashboard";
 import { Devices } from "./views/Devices";
 import { Pairing } from "./views/Pairing";
@@ -111,6 +112,7 @@ export function App() {
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [exposure, setExposure] = useState<NetworkExposure | null>(null);
   const [folders, setFolders] = useState<SharedFolder[]>([]);
+  const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -183,6 +185,22 @@ export function App() {
     const timer = window.setInterval(() => void reload(), 5_000);
     return () => window.clearInterval(timer);
   }, [reload]);
+
+  // La confirmacion se consulta aparte y mas a menudo que el resto: al otro
+  // lado hay alguien esperando a que esta pantalla le conteste, y cinco
+  // segundos se notan cuando se esta mirando.
+  useEffect(() => {
+    if (!isHostAvailable()) return;
+    const leer = () => {
+      void api
+        .pendingConfirmation()
+        .then(setConfirmation)
+        .catch(() => setConfirmation(null));
+    };
+    leer();
+    const timer = window.setInterval(leer, 1_500);
+    return () => window.clearInterval(timer);
+  }, []);
 
   /** Ejecuta una accion, muestra su error si falla y recarga el estado. */
   const run = useCallback(
@@ -283,6 +301,27 @@ export function App() {
         </>
       }
     >
+      {confirmation && (
+        <div style={{ maxWidth: 1100 }}>
+          <ConfirmationBanner
+            prompt={confirmation.prompt}
+            busy={busy}
+            onApprove={() =>
+              void run(async () => {
+                await api.approveConfirmation(confirmation.id);
+                setConfirmation(await api.pendingConfirmation());
+              })
+            }
+            onRefuse={() =>
+              void run(async () => {
+                await api.refuseConfirmation(confirmation.id);
+                setConfirmation(await api.pendingConfirmation());
+              })
+            }
+          />
+        </div>
+      )}
+
       {actionError && (
         <div style={{ marginBottom: "var(--space-5)", maxWidth: 1100 }}>
           <Notice tone="danger">{actionError}</Notice>

@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/capture",
+    "crates/clipboard",
     "crates/input",
+    "crates/power",
     "crates/transport",
     "crates/security",
     "crates/file-transfer",
@@ -28,7 +30,9 @@ nexus-core = { path = "crates/core" }
 nexus-security = { path = "crates/security" }
 nexus-transport = { path = "crates/transport" }
 nexus-capture = { path = "crates/capture" }
+nexus-clipboard = { path = "crates/clipboard" }
 nexus-input = { path = "crates/input" }
+nexus-power = { path = "crates/power" }
 nexus-audio = { path = "crates/audio" }
 nexus-file-transfer = { path = "crates/file-transfer" }
 
@@ -67,6 +71,14 @@ strip = "symbols"
 
 [profile.dev]
 opt-level = 1
+# Solo tablas de lineas, no la informacion de depuracion completa.
+#
+# Lo que se usa aqui de verdad es el `file:line` de un panico, y eso lo dan las
+# tablas de lineas. La informacion completa (tipos, variables locales) solo le
+# sirve a un depurador conectado, que en este proyecto no se usa, y multiplica
+# por varias veces el tamano de cada binario de prueba: con webrtc y Tauri
+# dentro, cada uno pasaba de 370 MB y llenaban el disco a mitad de sesion.
+debug = "line-tables-only"
 
 # El perfil que usa Tauri para los binarios distribuibles.
 [profile.dist]

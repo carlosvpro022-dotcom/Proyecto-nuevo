@@ -224,3 +224,69 @@ export function Icon({ name }: { name: string }) {
     </svg>
   );
 }
+
+/**
+ * Aviso de una operacion que espera decision en este PC.
+ *
+ * Se dibuja encima de todo lo demas a proposito: reiniciar o apagar no puede
+ * quedarse esperando en una pestana que nadie mire. Las dos respuestas pesan
+ * lo mismo en la pantalla porque ninguna es la «normal»: quien decide tiene
+ * que leer antes de pulsar.
+ */
+export function ConfirmationBanner({
+  prompt,
+  onApprove,
+  onRefuse,
+  busy,
+}: {
+  prompt: string;
+  onApprove: () => void;
+  onRefuse: () => void;
+  busy: boolean;
+}) {
+  return (
+    <div
+      role="alertdialog"
+      aria-label="Confirmacion pendiente"
+      style={{
+        border: "1px solid var(--warn, #c2821a)",
+        borderRadius: "var(--radius-md, 10px)",
+        background: "rgba(194, 130, 26, 0.10)",
+        padding: "var(--space-4, 16px)",
+        marginBottom: "var(--space-4, 16px)",
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "var(--space-3, 12px)",
+      }}
+    >
+      <div>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>
+          Un dispositivo remoto pide permiso
+        </div>
+        <div style={{ color: "var(--text-secondary)" }}>
+          {prompt}. No se hara nada hasta que usted decida aqui.
+        </div>
+      </div>
+      <div className="row" style={{ gap: "var(--space-2, 8px)" }}>
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          onClick={onRefuse}
+        >
+          No permitir
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          onClick={onApprove}
+        >
+          Permitir
+        </button>
+      </div>
+    </div>
+  );
+}
