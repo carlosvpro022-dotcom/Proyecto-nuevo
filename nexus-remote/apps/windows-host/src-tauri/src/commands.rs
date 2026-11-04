@@ -362,7 +362,7 @@ fn fundacion() -> Vec<FeatureStatus> {
             label: "Identidad criptografica del host",
             state: Working,
             stage: 1,
-            detail: "Par Ed25519 propio, persistente entre arranques. En Windows la clave se guarda cifrada con DPAPI; una clave antigua en claro se migra al arrancar.",
+            detail: "Par Ed25519 propio, persistente entre arranques. El formato cifrado y la migracion de una clave antigua estan probados; la llamada a DPAPI que cifra en Windows esta compilada pero sin ejecutar alli (ver «Bloquear, reiniciar y apagar»).",
         },
         FeatureStatus {
             key: "pairing",

@@ -17,14 +17,14 @@ entorno real**, y lo que todavía no existe.
 
 | Pieza | Qué hace |
 | --- | --- |
-| **Contratos del protocolo** | Mensajes de señalización y de control, permisos por operación, capacidades negociables, perfiles de calidad, monitores, máquina de estados de sesión. |
+| **Contratos del protocolo** | Mensajes de señalización y de control, permisos por operación, capacidades negociables, perfiles de calidad, monitores, máquina de estados de sesión. Cada petición del canal de control lleva un identificador que el host devuelve en su respuesta: emparejar por orden de llegada no sirve, porque hay peticiones sin respuesta y eventos que el host empuja por el mismo canal. |
 | **Identidad criptográfica** | Ed25519 por dispositivo, persistente entre arranques. Verificación estricta de firmas. |
 | **Autenticación mutua** | Reto de un solo uso firmado por ambas partes, con defensa contra reflexión y contra reenvío. |
 | **Emparejamiento** | Código temporal de 8 caracteres y QR. Derivado con Argon2id, 5 minutos, 5 intentos. |
 | **Lista de autorizados** | SQLite con permisos por dispositivo, revocación, borrado e historial de sesiones. |
 | **Límite de intentos** | Bloqueo progresivo por dispositivo. Esperar a que expire no reinicia la escalada. |
 | **Restricción de acceso al disco** | Solo las carpetas declaradas. Rechaza recorrido de directorios, enlaces que escapan y nombres reservados de Windows. |
-| **Clave del host cifrada en disco** | En Windows, con DPAPI: el descifrado queda atado a su cuenta, así que el archivo copiado a otro equipo no sirve. Una clave guardada antes de que existiera el cifrado se migra al arrancar sin cambiar la identidad del equipo, y si el cifrado falla el host sigue funcionando con la que ya tenía. |
+| **Clave del host cifrada en disco** | Una clave guardada antes de que existiera el cifrado se migra al arrancar sin cambiar la identidad del equipo, y si el cifrado falla el host sigue funcionando con la que ya tenía. Eso está probado; la llamada a DPAPI que cifra en Windows está abajo. |
 | **Confirmación en el PC para apagar** | Reiniciar y apagar no se hacen porque el dispositivo lo pida: el token que recibe quien lo pide **no vale** hasta que alguien lo apruebe en esta ventana. Un solo uso, caduca en dos minutos y muere con la sesión ([ADR-0013](docs/architecture/ADR-0013-confirmacion-en-el-host.md)). La decisión está probada; la llamada que apaga de verdad, no (abajo). |
 | **Límites del portapapeles** | Un texto que no quepa en el canal se rechaza en lugar de recortarse: medio comando o media contraseña con aspecto de estar completos es peor que un error. Leer y escribir el portapapeles de Windows está abajo. |
 | **Transferencia de archivos** | Listar, descargar y subir, por un canal binario propio. Un archivo subido se escribe aparte y solo aparece en su ruta cuando su contenido coincide con su `SHA-256`: si la sesión se corta, no queda nada a medias. Comprobado moviendo un archivo de varios trozos por un canal WebRTC real y verificando que llega idéntico ([ADR-0012](docs/architecture/ADR-0012-transferencia-de-archivos.md)). |
