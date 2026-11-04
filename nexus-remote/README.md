@@ -40,6 +40,10 @@ entorno real**, y lo que todavía no existe.
 
 Son dos cosas distintas, y conviene no confundirlas.
 
+> Para convertir esto en verificado hay una lista de comprobación ordenada:
+> [`docs/deployment/probar-en-windows.md`](docs/deployment/probar-en-windows.md).
+> Los cinco primeros pasos no necesitan ni servidor ni router.
+
 **El motor de Windows (etapa 2).** El compilador verificó tipos, nombres de API
 y firmas mediante compilación en cruce a `x86_64-pc-windows-gnu`, con clippy
 pedantic y los avisos como errores. **Nadie lo ha ejecutado en un PC con
