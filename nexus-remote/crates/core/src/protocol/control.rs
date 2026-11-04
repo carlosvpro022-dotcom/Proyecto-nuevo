@@ -8,13 +8,20 @@
 //! empuja sin que nadie los pida (cambio de monitores, progreso de
 //! transferencias, portapapeles).
 //!
+//! La correlacion no es un adorno. El orden de llegada no sirve para
+//! emparejar: hay peticiones que no llevan respuesta —un movimiento de raton
+//! no contesta nada— y el host mete eventos por el mismo canal sin que nadie
+//! los pida. Con una sola de esas cosas en medio, quien pregunta empezaria a
+//! atribuir cada respuesta a la peticion equivocada y no habria forma de
+//! notarlo.
+//!
 //! Cada peticion declara en [`ControlRequest::required_permission`] el permiso
 //! que necesita. El host comprueba ese permiso antes de ejecutar nada, en un
 //! solo punto, lo que evita que una funcion nueva se cuele sin control.
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::TransferId;
+use crate::ids::{RequestId, TransferId};
 use crate::monitor::MonitorLayout;
 use crate::permissions::Permission;
 use crate::protocol::input::InputEvent;
@@ -329,6 +336,24 @@ pub enum HostEvent {
         /// Estado actual.
         state: TransferState,
     },
+    /// Una transferencia se corto por un error.
+    ///
+    /// Es un evento y no una respuesta porque no contesta a ninguna peticion:
+    /// los bytes de una transferencia llegan por el canal binario, y lo que
+    /// falla ahi no tiene una peticion del canal de control a la que
+    /// responder.
+    TransferFailed {
+        /// Transferencia afectada, cuando se puede saber cual.
+        ///
+        /// Un marco tan mal formado que ni siquiera se puede leer de que
+        /// transferencia era deja esto vacio.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transfer_id: Option<TransferId>,
+        /// Codigo estable del motivo.
+        code: String,
+        /// Motivo legible.
+        message: String,
+    },
     /// El perfil de calidad en uso cambio (por adaptacion automatica).
     QualityChanged {
         /// Perfil efectivo.
@@ -351,11 +376,46 @@ pub enum HostEvent {
 #[serde(rename_all = "snake_case", tag = "channel")]
 pub enum ControlMessage {
     /// Peticion del controlador.
-    Request(ControlRequest),
+    Request {
+        /// Identificador con el que el host marcara su respuesta.
+        ///
+        /// Lo elige quien pregunta y el host lo devuelve tal cual. Sin el, la
+        /// unica forma de emparejar una respuesta con su peticion seria el
+        /// orden de llegada, y el orden no basta: hay peticiones que **no
+        /// llevan respuesta** (un movimiento de raton no contesta nada), y el
+        /// host empuja eventos por el mismo canal sin que nadie los pida. Con
+        /// una sola de esas cosas en medio, quien pregunta empezaria a
+        /// atribuir cada respuesta a la peticion equivocada.
+        id: RequestId,
+        /// Lo que se pide.
+        request: ControlRequest,
+    },
     /// Respuesta del host.
-    Response(ControlResponse),
+    Response {
+        /// El mismo identificador que traia la peticion.
+        id: RequestId,
+        /// Lo que contesta.
+        response: ControlResponse,
+    },
     /// Evento empujado por el host.
+    ///
+    /// No lleva identificador porque no contesta a nada: es el host contando
+    /// algo por su cuenta.
     Event(HostEvent),
+}
+
+impl ControlMessage {
+    /// Empaqueta una peticion con su identificador.
+    #[must_use]
+    pub const fn request(id: RequestId, request: ControlRequest) -> Self {
+        Self::Request { id, request }
+    }
+
+    /// Empaqueta una respuesta con el identificador de su peticion.
+    #[must_use]
+    pub const fn response(id: RequestId, response: ControlResponse) -> Self {
+        Self::Response { id, response }
+    }
 }
 
 #[cfg(test)]
@@ -538,27 +598,86 @@ mod tests {
     }
 
     #[test]
+    fn una_peticion_lleva_su_identificador_y_la_respuesta_lo_devuelve() {
+        let id = RequestId(7);
+        let peticion = ControlMessage::request(id, ControlRequest::ListMonitors);
+        let raw = crate::protocol::Envelope::new(peticion)
+            .encode()
+            .expect("codifica");
+
+        let vuelta: crate::protocol::Envelope<ControlMessage> =
+            crate::protocol::Envelope::decode(&raw).expect("decodifica");
+        match vuelta.payload {
+            ControlMessage::Request { id: leido, .. } => assert_eq!(leido, id),
+            otro => panic!("se esperaba una peticion: {otro:?}"),
+        }
+
+        let respuesta = ControlMessage::response(id, ControlResponse::Ack);
+        match respuesta {
+            ControlMessage::Response { id: devuelto, .. } => assert_eq!(devuelto, id),
+            otro => panic!("se esperaba una respuesta: {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn un_evento_no_lleva_identificador_porque_no_contesta_a_nada() {
+        // Es la distincion que hace util la correlacion: lo que el host empuja
+        // por su cuenta no se puede confundir con la respuesta a una peticion.
+        let evento = ControlMessage::Event(HostEvent::SessionLockChanged { locked: true });
+        let raw = crate::protocol::Envelope::new(evento)
+            .encode()
+            .expect("codifica");
+        assert!(
+            !raw.contains("\"id\""),
+            "un evento no deberia llevar identificador: {raw}"
+        );
+    }
+
+    #[test]
+    fn dos_peticiones_distintas_no_comparten_identificador_por_descuido() {
+        // Lo que protege: si el orden bastara, una peticion sin respuesta
+        // —como un movimiento de raton— desplazaria todas las siguientes.
+        let a = ControlMessage::request(RequestId::FIRST, ControlRequest::ListMonitors);
+        let b = ControlMessage::request(
+            RequestId::FIRST.next(),
+            ControlRequest::SelectMonitor { index: 1 },
+        );
+        match (a, b) {
+            (ControlMessage::Request { id: uno, .. }, ControlMessage::Request { id: dos, .. }) => {
+                assert_ne!(uno, dos);
+            }
+            otro => panic!("se esperaban dos peticiones: {otro:?}"),
+        }
+    }
+
+    #[test]
     fn control_messages_roundtrip() {
         let messages = vec![
-            ControlMessage::Request(ControlRequest::ListMonitors),
-            ControlMessage::Response(ControlResponse::Ack),
-            ControlMessage::Response(ControlResponse::ConfirmationRequired {
-                token: "t-1".into(),
-                prompt: "Reiniciar el equipo?".into(),
-            }),
-            ControlMessage::Response(ControlResponse::DirListing {
-                path: "C:/Users".into(),
-                entries: vec![DirEntry {
-                    name: "Documentos".into(),
-                    is_dir: true,
-                    size_bytes: 0,
-                    modified_at: Some(Timestamp(1)),
-                    hidden: false,
-                }],
-                offset: 0,
-                total_entries: 1,
-                scan_truncated: false,
-            }),
+            ControlMessage::request(RequestId::FIRST, ControlRequest::ListMonitors),
+            ControlMessage::response(RequestId::FIRST, ControlResponse::Ack),
+            ControlMessage::response(
+                RequestId::FIRST,
+                ControlResponse::ConfirmationRequired {
+                    token: "t-1".into(),
+                    prompt: "Reiniciar el equipo?".into(),
+                },
+            ),
+            ControlMessage::response(
+                RequestId::FIRST,
+                ControlResponse::DirListing {
+                    path: "C:/Users".into(),
+                    entries: vec![DirEntry {
+                        name: "Documentos".into(),
+                        is_dir: true,
+                        size_bytes: 0,
+                        modified_at: Some(Timestamp(1)),
+                        hidden: false,
+                    }],
+                    offset: 0,
+                    total_entries: 1,
+                    scan_truncated: false,
+                },
+            ),
             ControlMessage::Event(HostEvent::TransferProgress {
                 transfer_id: TransferId::new(),
                 transferred_bytes: 512,

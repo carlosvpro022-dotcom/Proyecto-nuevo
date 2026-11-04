@@ -18,7 +18,7 @@ use nexus_core::protocol::Envelope;
 use nexus_core::protocol::control::PowerAction;
 use nexus_core::protocol::control::{ControlMessage, ControlRequest, ControlResponse, HostEvent};
 use nexus_core::protocol::input::InputEvent;
-use nexus_core::{CoreError, PermissionSet, QualityPreset, QualityProfile, Timestamp};
+use nexus_core::{CoreError, PermissionSet, QualityPreset, QualityProfile, RequestId, Timestamp};
 use nexus_file_transfer::AccessPolicy;
 use nexus_file_transfer::error::FileError;
 use nexus_input::{InputInjector, resolve};
@@ -50,6 +50,13 @@ pub struct SessionHandler {
     clipboard: Box<dyn Clipboard>,
     power: Box<dyn PowerControl>,
     confirmations: SharedConfirmations,
+    /// Identificador de la peticion que se esta atendiendo.
+    ///
+    /// Lo pone [`SessionHandler::handle`] al decodificar, y lo usa
+    /// [`SessionHandler::respond`] para marcar la respuesta. Vive aqui, y no
+    /// como parametro de cada paso, porque el despacho tiene muchas ramas y
+    /// pasarlo por todas invitaria a olvidarlo en una.
+    current_request: RequestId,
     files: FileService,
     /// Descargas aceptadas que todavia no se han puesto en marcha.
     ///
@@ -98,6 +105,7 @@ impl SessionHandler {
             clipboard: default_clipboard(),
             power: default_power(),
             confirmations: SharedConfirmations::default(),
+            current_request: RequestId::FIRST,
             // Sin carpetas declaradas no se comparte nada. Es el valor por
             // omision a proposito: el acceso al disco se concede, no se hereda
             // de tener permiso de archivos.
@@ -234,10 +242,15 @@ impl SessionHandler {
     /// [`HostError::Protocol`] solo si la **respuesta** no se puede codificar,
     /// que seria un error interno.
     pub fn handle(&mut self, raw: &str) -> HostResult<Option<String>> {
-        let request = match Self::decode(raw) {
-            Ok(request) => request,
+        let (id, request) = match Self::decode(raw) {
+            Ok(decodificado) => decodificado,
+            // Si ni siquiera se pudo leer la peticion, no hay identificador
+            // que devolver. Se contesta con el de la ultima que si se leyo,
+            // que es lo unico que hay; quien pregunta vera que no cuadra con
+            // nada pendiente y sabra que algo envio mal.
             Err(reason) => return self.deny("bad_request", &reason).map(Some),
         };
+        self.current_request = id;
 
         // Primero el permiso. Antes de mirar que pide.
         if self
@@ -270,7 +283,7 @@ impl SessionHandler {
             ControlRequest::Input { event } => self.handle_input(&event),
             ControlRequest::ListMonitors => {
                 self.applied = self.applied.saturating_add(1);
-                Self::respond(ControlResponse::Monitors {
+                self.respond(ControlResponse::Monitors {
                     layout: self.monitors.clone(),
                 })
                 .map(Some)
@@ -279,7 +292,7 @@ impl SessionHandler {
                 if self.monitors.0.iter().any(|m| m.index == index) {
                     self.active_monitor = index;
                     self.applied = self.applied.saturating_add(1);
-                    Self::respond(ControlResponse::Ack).map(Some)
+                    self.respond(ControlResponse::Ack).map(Some)
                 } else {
                     self.deny("unknown_monitor", &format!("el monitor {index} no existe"))
                         .map(Some)
@@ -338,7 +351,7 @@ impl SessionHandler {
             }
             ControlRequest::SystemStatus => {
                 self.applied = self.applied.saturating_add(1);
-                Self::respond(ControlResponse::SystemStatus {
+                self.respond(ControlResponse::SystemStatus {
                     status: crate::system::read_status(),
                 })
                 .map(Some)
@@ -351,7 +364,7 @@ impl SessionHandler {
                     Ok(()) => {
                         self.quality = profile;
                         self.applied = self.applied.saturating_add(1);
-                        Self::respond(ControlResponse::Ack).map(Some)
+                        self.respond(ControlResponse::Ack).map(Some)
                     }
                     Err(error) => self.deny("invalid_quality", &error.to_string()).map(Some),
                 }
@@ -387,7 +400,19 @@ impl SessionHandler {
             Ok(None) => Ok(None),
             Err(error) => {
                 tracing::warn!(%error, "se rechazo un marco del canal de archivos");
-                self.refuse_file(&error).map(Some)
+                self.refused = self.refused.saturating_add(1);
+                // Un evento y no una respuesta: esto no contesta a ninguna
+                // peticion del canal de control, asi que no hay identificador
+                // con el que marcarla. Lleva el de la transferencia cuando el
+                // marco permite saber de cual era.
+                Self::event(HostEvent::TransferFailed {
+                    transfer_id: nexus_file_transfer::Frame::parse(raw)
+                        .ok()
+                        .map(|f| f.transfer_id()),
+                    code: deny_code(&error).to_owned(),
+                    message: deny_message(&error),
+                })
+                .map(Some)
             }
         }
     }
@@ -440,11 +465,12 @@ impl SessionHandler {
             // se ejecuta nada, y la cuenta de ordenes aplicadas no sube:
             // todavia no ha pasado nada en el equipo.
             let pedido = self.confirmations.request(action, now);
-            return Self::respond(ControlResponse::ConfirmationRequired {
-                token: pedido.token,
-                prompt: pedido.prompt,
-            })
-            .map(Some);
+            return self
+                .respond(ControlResponse::ConfirmationRequired {
+                    token: pedido.token,
+                    prompt: pedido.prompt,
+                })
+                .map(Some);
         };
 
         match self.confirmations.redeem(action, token, now) {
@@ -468,7 +494,7 @@ impl SessionHandler {
             Ok(()) => {
                 tracing::warn!(?action, "operacion de energia ejecutada");
                 self.applied = self.applied.saturating_add(1);
-                Self::respond(ControlResponse::Ack).map(Some)
+                self.respond(ControlResponse::Ack).map(Some)
             }
             Err(error) => {
                 let code = match error {
@@ -516,7 +542,7 @@ impl SessionHandler {
             Ok(respuesta) => {
                 self.applied = self.applied.saturating_add(1);
                 match respuesta {
-                    Respuesta::Control(response) => Self::respond(response).map(Some),
+                    Respuesta::Control(response) => self.respond(response).map(Some),
                     Respuesta::Evento(event) => Self::event(event).map(Some),
                 }
             }
@@ -532,7 +558,7 @@ impl SessionHandler {
         match hecho {
             Ok(response) => {
                 self.applied = self.applied.saturating_add(1);
-                Self::respond(response).map(Some)
+                self.respond(response).map(Some)
             }
             Err(error) => self.refuse_clipboard(&error).map(Some),
         }
@@ -571,12 +597,12 @@ impl SessionHandler {
             .map_err(|e| HostError::Protocol(e.to_string()))
     }
 
-    fn decode(raw: &str) -> Result<ControlRequest, String> {
+    fn decode(raw: &str) -> Result<(RequestId, ControlRequest), String> {
         let envelope: Envelope<ControlMessage> =
             Envelope::decode(raw).map_err(|e: CoreError| e.to_string())?;
         match envelope.payload {
-            ControlMessage::Request(request) => Ok(request),
-            ControlMessage::Response(_) | ControlMessage::Event(_) => {
+            ControlMessage::Request { id, request } => Ok((id, request)),
+            ControlMessage::Response { .. } | ControlMessage::Event(_) => {
                 Err("por el canal de control solo se admiten peticiones".to_owned())
             }
         }
@@ -584,16 +610,19 @@ impl SessionHandler {
 
     fn deny(&mut self, code: &str, message: &str) -> HostResult<String> {
         self.refused = self.refused.saturating_add(1);
-        Self::respond(ControlResponse::Denied {
+        self.respond(ControlResponse::Denied {
             code: code.to_owned(),
             message: message.to_owned(),
         })
     }
 
-    fn respond(response: ControlResponse) -> HostResult<String> {
-        Envelope::at(Timestamp::now(), ControlMessage::Response(response))
-            .encode()
-            .map_err(|e| HostError::Protocol(e.to_string()))
+    fn respond(&self, response: ControlResponse) -> HostResult<String> {
+        Envelope::at(
+            Timestamp::now(),
+            ControlMessage::response(self.current_request, response),
+        )
+        .encode()
+        .map_err(|e| HostError::Protocol(e.to_string()))
     }
 }
 
@@ -666,6 +695,8 @@ mod tests {
     struct Probe {
         handler: SessionHandler,
         injector: SharedInjector,
+        /// Ultimo identificador enviado, para comprobar la correlacion.
+        enviado: RequestId,
     }
 
     impl Probe {
@@ -674,13 +705,18 @@ mod tests {
             Self {
                 handler: SessionHandler::new(permissions, monitors(), Box::new(injector.clone())),
                 injector,
+                enviado: RequestId::FIRST,
             }
         }
 
+        /// Envia una peticion y devuelve la respuesta, comprobando de paso
+        /// que viene marcada con el identificador que se mando.
         fn send(&mut self, request: ControlRequest) -> Option<ControlResponse> {
+            self.enviado = self.enviado.next();
+            let enviado = self.enviado;
             let raw = Envelope::at(
                 Timestamp(1_730_000_000_000),
-                ControlMessage::Request(request),
+                ControlMessage::request(enviado, request),
             )
             .encode()
             .expect("codifica");
@@ -689,7 +725,13 @@ mod tests {
                 let envelope: Envelope<ControlMessage> =
                     Envelope::decode(&raw).expect("la respuesta cumple el protocolo");
                 match envelope.payload {
-                    ControlMessage::Response(response) => response,
+                    ControlMessage::Response { id, response } => {
+                        assert_eq!(
+                            id, enviado,
+                            "la respuesta tiene que llevar el identificador de su peticion"
+                        );
+                        response
+                    }
                     other => panic!("se esperaba una respuesta, llego {other:?}"),
                 }
             })
@@ -744,7 +786,15 @@ mod tests {
             .with_shared_folders(nexus_file_transfer::AccessPolicy::new(vec![
                 nexus_file_transfer::SharedRoot::writable("Intercambio", &compartida),
             ]));
-        (Probe { handler, injector }, temp, compartida)
+        (
+            Probe {
+                handler,
+                injector,
+                enviado: RequestId::FIRST,
+            },
+            temp,
+            compartida,
+        )
     }
 
     #[test]
@@ -839,7 +889,14 @@ mod tests {
             .with_clipboard(Box::new(PortapapelesCompartido(std::sync::Arc::clone(
                 &compartido,
             ))));
-        (Probe { handler, injector }, compartido)
+        (
+            Probe {
+                handler,
+                injector,
+                enviado: RequestId::FIRST,
+            },
+            compartido,
+        )
     }
 
     /// Portapapeles de prueba cuyo contenido vive fuera del manejador.
@@ -1010,7 +1067,14 @@ mod tests {
         let injector = SharedInjector::default();
         let handler = SessionHandler::new(permissions, monitors(), Box::new(injector.clone()))
             .with_power(Box::new(energia.clone()));
-        (Probe { handler, injector }, energia)
+        (
+            Probe {
+                handler,
+                injector,
+                enviado: RequestId::FIRST,
+            },
+            energia,
+        )
     }
 
     /// Backend de energia cuyo registro vive fuera del manejador.
@@ -1479,9 +1543,12 @@ mod tests {
     fn una_respuesta_no_se_admite_como_peticion() {
         // El canal es bidireccional; un cliente no debe poder colar respuestas.
         let mut probe = Probe::with(PermissionSet::full());
-        let raw = Envelope::at(Timestamp(1), ControlMessage::Response(ControlResponse::Ack))
-            .encode()
-            .expect("codifica");
+        let raw = Envelope::at(
+            Timestamp(1),
+            ControlMessage::response(RequestId::FIRST, ControlResponse::Ack),
+        )
+        .encode()
+        .expect("codifica");
         assert!(probe.handler.handle(&raw).expect("no falla").is_some());
         assert_eq!(probe.handler.refused(), 1);
     }

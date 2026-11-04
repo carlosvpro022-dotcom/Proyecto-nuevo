@@ -35,7 +35,7 @@ use nexus_core::protocol::control::{
     ControlMessage, ControlRequest, ControlResponse, DirEntry, HostEvent, TransferState,
 };
 use nexus_core::protocol::signaling::{ClientToServer, ServerToClient};
-use nexus_core::{DeviceId, Permission, PermissionSet, SessionId, TransferId};
+use nexus_core::{DeviceId, Permission, PermissionSet, RequestId, SessionId, TransferId};
 use nexus_file_transfer::{CHUNK_SIZE_BYTES, Frame, SharedRoot};
 use nexus_security::DeviceIdentity;
 use nexus_security::registry::DeviceRecord;
@@ -258,7 +258,10 @@ impl Controlador {
 
 /// Envia una peticion por el canal de control.
 async fn pedir(peer: &PeerSession, request: ControlRequest) {
-    let raw = Envelope::new(ControlMessage::Request(request))
+    // Esta prueba conduce un guion paso a paso, asi que le basta un
+    // identificador cualquiera: la correlacion la comprueba a fondo
+    // `canal_de_control`.
+    let raw = Envelope::new(ControlMessage::request(RequestId::FIRST, request))
         .encode()
         .expect("codifica");
     peer.send(CONTROL_CHANNEL, raw.as_bytes())
@@ -279,11 +282,15 @@ async fn atender_control(
         Envelope::decode(texto).expect("la respuesta cumple el protocolo");
 
     match sobre.payload {
-        ControlMessage::Response(ControlResponse::DirListing {
-            entries,
-            total_entries,
+        ControlMessage::Response {
+            response:
+                ControlResponse::DirListing {
+                    entries,
+                    total_entries,
+                    ..
+                },
             ..
-        }) => {
+        } => {
             recogido.listado = Some((total_entries, entries));
             // Siguiente: una ruta que no deberia poder verse.
             pedir(
@@ -296,7 +303,10 @@ async fn atender_control(
             .await;
             Paso::Fisgando
         }
-        ControlMessage::Response(ControlResponse::Denied { code, message }) => {
+        ControlMessage::Response {
+            response: ControlResponse::Denied { code, message },
+            ..
+        } => {
             recogido.rechazos.push((code, message));
             match paso {
                 Paso::Fisgando => {
@@ -313,10 +323,14 @@ async fn atender_control(
                 otro => otro,
             }
         }
-        ControlMessage::Response(ControlResponse::TransferAccepted {
-            transfer_id,
-            size_bytes,
-        }) => {
+        ControlMessage::Response {
+            response:
+                ControlResponse::TransferAccepted {
+                    transfer_id,
+                    size_bytes,
+                },
+            ..
+        } => {
             recogido.aceptadas.push((transfer_id, size_bytes));
             if paso == Paso::Subiendo {
                 // La subida ya esta aceptada: ahora van los bytes.
@@ -595,7 +609,10 @@ async fn sustituir_contenido(
     let sobre: Envelope<ControlMessage> = Envelope::decode(texto).expect("cumple el protocolo");
 
     match sobre.payload {
-        ControlMessage::Response(ControlResponse::TransferAccepted { transfer_id, .. }) => {
+        ControlMessage::Response {
+            response: ControlResponse::TransferAccepted { transfer_id, .. },
+            ..
+        } => {
             let falso = b"CONTENIDO SUSTITUIDO".to_vec();
             let marco = Frame::Data {
                 transfer_id,
@@ -617,7 +634,14 @@ async fn sustituir_contenido(
                 .expect("envia el cierre");
             None
         }
-        ControlMessage::Response(ControlResponse::Denied { code, message }) => {
+        ControlMessage::Response {
+            response: ControlResponse::Denied { code, message },
+            ..
+        } => Some((code, message)),
+        // Lo que falla al mover bytes llega como **evento**, no como
+        // respuesta: no contesta a ninguna peticion del canal de control, asi
+        // que no hay identificador con el que marcarla.
+        ControlMessage::Event(HostEvent::TransferFailed { code, message, .. }) => {
             Some((code, message))
         }
         _ => None,

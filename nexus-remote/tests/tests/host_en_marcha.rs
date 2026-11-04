@@ -25,7 +25,7 @@ use nexus_core::protocol::Envelope;
 use nexus_core::protocol::control::{ControlMessage, ControlRequest};
 use nexus_core::protocol::input::{InputEvent, KeyState, PointerButton};
 use nexus_core::protocol::signaling::{ClientToServer, ServerToClient};
-use nexus_core::{DeviceId, Permission, PermissionSet, SessionId};
+use nexus_core::{DeviceId, Permission, PermissionSet, RequestId, SessionId};
 use nexus_input::ResolvedInput;
 use nexus_security::registry::DeviceRecord;
 use nexus_security::{AuthRole, DeviceIdentity, SessionBinding};
@@ -148,7 +148,8 @@ impl Controlador {
                         }
                         PeerEvent::ChannelOpen { label } if label == INPUT_CHANNEL => {
                             for event in toque() {
-                                let sobre = Envelope::new(ControlMessage::Request(
+                                let sobre = Envelope::new(ControlMessage::request(
+                                    RequestId::FIRST,
                                     ControlRequest::Input { event },
                                 ));
                                 let raw = sobre.encode().expect("codifica");

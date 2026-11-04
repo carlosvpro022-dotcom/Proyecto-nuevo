@@ -30,7 +30,7 @@ use nexus_core::protocol::Envelope;
 use nexus_core::protocol::control::{ControlMessage, ControlRequest};
 use nexus_core::protocol::input::{InputEvent, KeyState, PointerButton};
 use nexus_core::protocol::signaling::{ClientToServer, ServerToClient};
-use nexus_core::{DeviceId, PermissionSet, SessionId};
+use nexus_core::{DeviceId, PermissionSet, RequestId, SessionId};
 use nexus_input::ResolvedInput;
 use nexus_security::{
     AuthRole, BindingProof, DeviceIdentity, DevicePublicKey, SecurityError, SessionBinding,
@@ -505,7 +505,10 @@ async fn atender_senalizacion_controlador(extremo: &mut Extremo, mensaje: Server
 /// Envia el toque completo por el canal de entrada.
 async fn enviar_toque(extremo: &Extremo) {
     for event in toque() {
-        let mensaje = Envelope::new(ControlMessage::Request(ControlRequest::Input { event }));
+        let mensaje = Envelope::new(ControlMessage::request(
+            RequestId::FIRST,
+            ControlRequest::Input { event },
+        ));
         let raw = mensaje.encode().expect("codifica el evento");
         extremo
             .peer
