@@ -2679,6 +2679,7 @@ dependencies = [
  "futures-util",
  "nexus-core",
  "nexus-security",
+ "rtc",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

@@ -29,6 +29,7 @@ entorno real**, y lo que todavía no existe.
 | **Límites del portapapeles** | Un texto que no quepa en el canal se rechaza en lugar de recortarse: medio comando o media contraseña con aspecto de estar completos es peor que un error. Leer y escribir el portapapeles de Windows está abajo. |
 | **Transferencia de archivos** | Listar, descargar y subir, por un canal binario propio. Un archivo subido se escribe aparte y solo aparece en su ruta cuando su contenido coincide con su `SHA-256`: si la sesión se corta, no queda nada a medias. Comprobado moviendo un archivo de varios trozos por un canal WebRTC real y verificando que llega idéntico ([ADR-0012](docs/architecture/ADR-0012-transferencia-de-archivos.md)). |
 | **Servidor de señalización** | `/v1/signaling` completo: autenticación Ed25519 del dispositivo, directorio de identidades con testigo de alta, límite de intentos por dispositivo y por origen, enrutado entre los dos extremos, registro de conexiones. |
+| **La pista de vídeo llega al otro extremo** | Dos conexiones reales negocian una pista H.264 y lo que el host escribe en ella llega íntegro al otro lado: sección de medios en el SDP, troceado en paquetes RTP y cifrado DTLS-SRTP. **No es transmisión de pantalla**: lo que viaja en la prueba son bytes con la forma correcta, no imágenes. Lo que demuestra es que el camino por el que viajará la pantalla funciona. |
 | **Conexión cifrada entre dispositivos** | WebRTC de verdad: ICE encuentra camino, DTLS cifra y los canales `control` e `input` transportan órdenes. Comprobado de extremo a extremo: un toque enviado por un par llega al otro y se aplica. |
 | **El host atiende sesiones** | Se conecta solo, decide cada petición contra su registro local, comprueba quién hay al otro lado y sirve el canal de control. Reintenta con espera creciente si el enlace se cae. **No aplica ni una orden antes de autenticar al otro extremo.** |
 | **Historial de sesiones** | Cada sesión queda registrada con su dispositivo, su duración y por qué terminó. |
@@ -83,7 +84,7 @@ Hace falta desplegar el servidor.
 | --- | --- | --- |
 | Emparejar desde fuera de la red local | 3 | El servidor lo rechaza a propósito: el código tiene unos 40 bits y viajaría en claro por él. Falta enviar un verificador Argon2id y confirmar la huella en el host ([ADR-0010](docs/architecture/ADR-0010-emparejamiento-por-red.md)). Mientras, se empareja en la red local. |
 | Cliente de iPhone y iPad | 4 | El proyecto entero. **Hace falta un Mac con Xcode.** |
-| Transmisión de la pantalla | 5 | La captura existe y la conexión existe; falta codificar los fotogramas y enviarlos por una pista de medios. |
+| Transmisión de la pantalla | 5 | **Falta el codificador.** El camino ya está: la pista de vídeo negocia H.264 de perfil base —el que un iPhone decodifica por hardware— y lo que se escribe en ella llega al otro extremo, comprobado entre dos conexiones reales. Lo que falta es convertir los fotogramas capturados en algo que escribir. |
 | Audio del sistema | 5 | La captura WASAPI en modo bucle. El formato y el control de volumen están listos. |
 
 El panel refleja esta misma distinción con tres estados —*Probado*, *Sin

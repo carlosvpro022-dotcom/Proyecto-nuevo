@@ -13,7 +13,7 @@ default = ["peer"]
 # La conexion WebRTC de verdad. Se puede desactivar para que el servidor de
 # senalizacion use el codec y la configuracion ICE sin arrastrar la pila
 # completa de WebRTC, que no necesita: el servidor no participa en la sesion.
-peer = ["dep:webrtc", "dep:async-trait", "dep:bytes", "dep:tokio-tungstenite", "tokio/rt-multi-thread", "tokio/net"]
+peer = ["dep:webrtc", "dep:rtc", "dep:async-trait", "dep:bytes", "dep:tokio-tungstenite", "tokio/rt-multi-thread", "tokio/net"]
 
 [dependencies]
 async-trait = { version = "0.1.92", optional = true }
@@ -28,6 +28,9 @@ tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"], optional = true }
 tracing = "0.1.44"
 webrtc = { version = "0.21.1", optional = true }
+# Los tipos de la pista de video (codec, parametros, muestra) viven aqui; el
+# crate `webrtc` reexporta solo una parte y sus propios ejemplos usan este.
+rtc = { version = "0.21.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["full"] }

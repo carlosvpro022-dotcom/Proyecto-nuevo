@@ -39,8 +39,18 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use nexus_security::DtlsFingerprint;
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
+
+use rtc::media::Sample;
+use rtc::media_stream::MediaStreamTrack;
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
+use webrtc::media_stream::track_local::TrackLocal;
+use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
+use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use webrtc::peer_connection::{
     MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
     RTCConfiguration, RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceCandidateType,
@@ -56,6 +66,15 @@ use crate::ice::{IceConfiguration, TransportPolicy};
 pub const CONTROL_CHANNEL: &str = "control";
 /// Canal de raton y teclado.
 pub const INPUT_CHANNEL: &str = "input";
+/// Pista por la que viaja la pantalla del host.
+///
+/// El video no va por un canal de datos: va por una pista de medios, que es
+/// lo que WebRTC tiene pensado para esto. La diferencia no es de forma. Una
+/// pista trae de serie el troceado en paquetes RTP, las marcas de tiempo, el
+/// aviso al emisor cuando se pierde algo y el control de congestion; por un
+/// canal de datos todo eso habria que escribirlo, y escribirlo peor.
+pub const SCREEN_TRACK: &str = "pantalla";
+
 /// Canal de los bytes de los archivos.
 ///
 /// Va aparte del de control por dos razones. Los bytes van en binario, sin
@@ -63,6 +82,24 @@ pub const INPUT_CHANNEL: &str = "input";
 /// y fiable: una descarga de dos gigas en el canal de control dejaria el raton
 /// congelado detras de ella hasta terminar.
 pub const FILES_CHANNEL: &str = "files";
+
+/// Codec con el que se negocia la pantalla: H.264 de perfil base.
+///
+/// Lo elige el otro extremo, no este. Un iPhone y un iPad decodifican este
+/// perfil por hardware, que es la diferencia entre una hora de uso y media
+/// hora de bateria. Los parametros son exactamente los que la biblioteca
+/// registra para la carga 102, de modo que la negociacion no tiene que
+/// inventar nada.
+const VIDEO_MIME: &str = "video/H264";
+
+/// Reloj de RTP para video, fijado por el estandar.
+const VIDEO_CLOCK_RATE: u32 = 90_000;
+
+/// Parametros del perfil base, tal como los registra la biblioteca.
+const VIDEO_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f";
+
+/// Tipo de carga que corresponde a esos parametros.
+const VIDEO_PAYLOAD_TYPE: u8 = 102;
 
 /// Tope de bytes que un canal puede tener pendientes de salir.
 ///
@@ -223,6 +260,24 @@ pub enum PeerEvent {
         /// Contenido.
         data: Vec<u8>,
     },
+    /// El otro extremo abrio una pista de medios.
+    TrackOpen {
+        /// Identificador de la pista.
+        id: String,
+    },
+    /// Llego un paquete de la pantalla.
+    ///
+    /// Es un paquete RTP, no un fotograma: un fotograma grande viaja troceado
+    /// y hay que recomponerlo. Quien lo reciba junta los trozos siguiendo la
+    /// marca `last` y las marcas de tiempo.
+    ScreenPacket {
+        /// Carga del paquete, sin la cabecera RTP.
+        payload: Vec<u8>,
+        /// Marca de tiempo RTP, la misma para todos los trozos de un fotograma.
+        timestamp: u32,
+        /// Si es el ultimo trozo de su fotograma.
+        last: bool,
+    },
 }
 
 type ChannelMap = Arc<Mutex<HashMap<String, Arc<dyn DataChannel>>>>;
@@ -261,6 +316,82 @@ const fn rtc_transport_policy(policy: TransportPolicy) -> RTCIceTransportPolicy 
     match policy {
         TransportPolicy::All => RTCIceTransportPolicy::All,
         TransportPolicy::RelayOnly => RTCIceTransportPolicy::Relay,
+    }
+}
+
+/// Sortea el identificador de sincronizacion de esta sesion.
+///
+/// No es un secreto y no hace falta que lo sea: solo distingue este flujo de
+/// otro que comparta la conexion. Se evita el cero, que el estandar reserva.
+fn random_ssrc() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64),
+    );
+    (hasher.finish() as u32).max(1)
+}
+
+/// Construye la pista por la que saldra la pantalla.
+///
+/// El identificador de sincronizacion (`ssrc`) se sortea por sesion: es lo que
+/// distingue este flujo de cualquier otro que comparta la conexion.
+///
+/// # Errors
+///
+/// [`TransportError::Peer`] si la biblioteca no puede preparar el troceado en
+/// paquetes para este codec.
+fn screen_track(ssrc: u32) -> TransportResult<TrackLocalStaticSample> {
+    let codec = RTCRtpCodec {
+        mime_type: VIDEO_MIME.to_owned(),
+        clock_rate: VIDEO_CLOCK_RATE,
+        channels: 0,
+        sdp_fmtp_line: VIDEO_FMTP.to_owned(),
+        rtcp_feedback: Vec::new(),
+    };
+
+    TrackLocalStaticSample::new(
+        std::time::Instant::now(),
+        MediaStreamTrack::new(
+            "nexus".to_owned(),
+            SCREEN_TRACK.to_owned(),
+            SCREEN_TRACK.to_owned(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc),
+                    ..Default::default()
+                },
+                codec,
+                ..Default::default()
+            }],
+        ),
+    )
+    .map_err(|e| TransportError::Peer(e.to_string()))
+}
+
+/// Reenvia los paquetes de una pista remota a la cola de eventos.
+async fn forward_track(track: Arc<dyn TrackRemote>, events: mpsc::Sender<PeerEvent>) {
+    while let Some(event) = track.poll().await {
+        let reenviado = match event {
+            TrackRemoteEvent::OnOpen(_) => PeerEvent::TrackOpen {
+                id: SCREEN_TRACK.to_owned(),
+            },
+            TrackRemoteEvent::OnRtpPacket(packet) => PeerEvent::ScreenPacket {
+                payload: packet.payload.to_vec(),
+                timestamp: packet.header.timestamp,
+                last: packet.header.marker,
+            },
+            // El resto del ciclo de vida de la pista no cambia nada de lo que
+            // este programa hace: la sesion la gobierna la conexion, no la
+            // pista.
+            _ => continue,
+        };
+        if events.send(reenviado).await.is_err() {
+            return;
+        }
     }
 }
 
@@ -312,6 +443,10 @@ impl PeerConnectionEventHandler for Bridge {
             _ => LinkPhase::Connecting,
         };
         let _ = self.events.send(PeerEvent::Phase(phase)).await;
+    }
+
+    async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        tokio::spawn(forward_track(track, self.events.clone()));
     }
 
     async fn on_data_channel(&self, channel: Arc<dyn DataChannel>) {
@@ -369,7 +504,56 @@ async fn register_channel(
 pub struct PeerSession {
     connection: Arc<dyn PeerConnection>,
     channels: ChannelMap,
+    /// Pista de la pantalla, cuando este extremo es el que la envia.
+    screen: Option<Arc<ScreenSender>>,
     events: mpsc::Receiver<PeerEvent>,
+}
+
+/// La pista de la pantalla, lista para enviar fotogramas.
+///
+/// Esta aparte de [`PeerSession`] para poder clonarla a la tarea que captura:
+/// enviar no necesita acceso exclusivo a la conexion, y leer eventos si.
+pub struct ScreenSender {
+    track: Arc<TrackLocalStaticSample>,
+    ssrc: u32,
+}
+
+impl std::fmt::Debug for ScreenSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScreenSender")
+            .field("ssrc", &self.ssrc)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScreenSender {
+    /// Envia un fotograma ya codificado.
+    ///
+    /// `data` es el flujo de bytes del codec, no paquetes: la biblioteca lo
+    /// trocea en paquetes RTP del tamano que quepa en la red. `duration` es lo
+    /// que dura el fotograma en pantalla, y de ahi sale su marca de tiempo.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Peer`] si la conexion ya no admite envios.
+    pub async fn send_frame(&self, data: &[u8], duration: Duration) -> TransportResult<()> {
+        self.track
+            .write_sample(
+                self.ssrc,
+                VIDEO_PAYLOAD_TYPE,
+                &Sample {
+                    data: bytes::Bytes::copy_from_slice(data),
+                    timestamp: std::time::Instant::now(),
+                    duration,
+                    packet_timestamp: 0,
+                    prev_dropped_packets: 0,
+                    prev_padding_packets: 0,
+                },
+                &[],
+            )
+            .await
+            .map_err(|e| TransportError::Peer(e.to_string()))
+    }
 }
 
 impl std::fmt::Debug for PeerSession {
@@ -529,6 +713,10 @@ impl PeerSession {
             .map_err(|e| TransportError::Peer(e.to_string()))?;
         let connection: Arc<dyn PeerConnection> = Arc::new(connection);
 
+        // La pista de la pantalla se declara al abrir, antes de la oferta:
+        // despues ya no se puede anadir sin renegociar, y renegociar a mitad
+        // de una sesion es una fuente de fallos que no hace falta tener.
+        let mut screen = None;
         if role == PeerRole::Offerer {
             for label in [CONTROL_CHANNEL, INPUT_CHANNEL, FILES_CHANNEL] {
                 let channel = connection
@@ -537,13 +725,32 @@ impl PeerSession {
                     .map_err(|e| TransportError::Peer(e.to_string()))?;
                 register_channel(&channels, &sender, channel).await;
             }
+
+            let ssrc = random_ssrc();
+            let track = Arc::new(screen_track(ssrc)?);
+            connection
+                .add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
+                .await
+                .map_err(|e| TransportError::Peer(e.to_string()))?;
+            screen = Some(Arc::new(ScreenSender { track, ssrc }));
         }
 
         Ok(Self {
             connection,
             channels,
+            screen,
             events,
         })
+    }
+
+    /// Extremo por el que se envia la pantalla, si este lado es el que la
+    /// envia.
+    ///
+    /// Solo lo tiene quien abrio la conexion como [`PeerRole::Offerer`], que
+    /// en este producto es siempre el host.
+    #[must_use]
+    pub fn screen(&self) -> Option<Arc<ScreenSender>> {
+        self.screen.clone()
     }
 
     /// Crea la oferta y la fija como descripcion local.

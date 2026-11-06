@@ -490,9 +490,12 @@ fn funciones_avanzadas() -> Vec<FeatureStatus> {
         FeatureStatus {
             key: "video",
             label: "Transmision de la pantalla al dispositivo",
+            // Sigue pendiente, y no se adelanta: la pista negocia y entrega
+            // lo que se escribe en ella, probado entre dos extremos reales,
+            // pero sin codificador no hay nada que escribir.
             state: Pending,
             stage: 5,
-            detail: "La captura existe y la conexion existe; falta codificar los fotogramas y                      enviarlos por una pista de medios.",
+            detail: "El camino ya funciona: la pista de video negocia H.264 y lo que se escribe en ella llega al otro extremo, comprobado entre dos conexiones reales. Falta el codificador que convierta los fotogramas capturados en algo que escribir.",
         },
         FeatureStatus {
             key: "audio",
