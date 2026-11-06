@@ -26,6 +26,7 @@ nexus-keyvault = { version = "0.1.0", path = "../../../crates/keyvault" }
 nexus-power = { version = "0.1.0", path = "../../../crates/power" }
 nexus-security = { version = "0.1.0", path = "../../../crates/security" }
 nexus-transport = { version = "0.1.0", path = "../../../crates/transport" }
+nexus-video = { version = "0.1.0", path = "../../../crates/video" }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

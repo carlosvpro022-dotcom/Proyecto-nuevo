@@ -34,6 +34,7 @@ pub mod files;
 pub mod host;
 pub mod identity;
 pub mod runtime;
+pub mod screen;
 pub mod session;
 pub mod signaling;
 pub mod store;

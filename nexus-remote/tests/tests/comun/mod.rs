@@ -239,6 +239,48 @@ impl HostDeProducto {
         emparejados: Vec<nexus_security::registry::DeviceRecord>,
         carpetas: Vec<nexus_file_transfer::SharedRoot>,
     ) -> Self {
+        Self::arrancar_con(server, emparejados, carpetas, None).await
+    }
+
+    /// Igual, con una pantalla que el host pueda capturar y enviar.
+    ///
+    /// Sin esto el host arranca con el capturador de la plataforma, que fuera
+    /// de Windows no captura nada y lo dice. Con esto recorre el camino
+    /// completo: escalar, codificar, trocear en RTP y entregar.
+    ///
+    /// La pantalla se pasa a proposito en lugar de fijarla: codificar
+    /// 1920x1080 cuesta bastante CPU, y una prueba que no este midiendo eso
+    /// deberia pedir una pantalla pequena para no ahogar la maquina donde
+    /// corre.
+    pub async fn arrancar_con_pantalla(
+        server: &TestServer,
+        emparejados: Vec<nexus_security::registry::DeviceRecord>,
+        pantalla: nexus_core::monitor::MonitorLayout,
+    ) -> Self {
+        Self::arrancar_con(server, emparejados, Vec::new(), Some(pantalla)).await
+    }
+
+    /// Una pantalla pequena, para pruebas que no miden la imagen.
+    pub fn pantalla_pequena() -> nexus_core::monitor::MonitorLayout {
+        nexus_core::monitor::MonitorLayout(vec![nexus_core::monitor::MonitorInfo {
+            index: 0,
+            name: "Pequena".to_owned(),
+            width: 320,
+            height: 240,
+            origin_x: 0,
+            origin_y: 0,
+            scale_percent: 100,
+            is_primary: true,
+            refresh_hz: Some(60),
+        }])
+    }
+
+    async fn arrancar_con(
+        server: &TestServer,
+        emparejados: Vec<nexus_security::registry::DeviceRecord>,
+        carpetas: Vec<nexus_file_transfer::SharedRoot>,
+        pantalla: Option<nexus_core::monitor::MonitorLayout>,
+    ) -> Self {
         let host = Device::host("PC del salon");
         let mut registro = nexus_windows_host::runtime::InMemoryLookup::new();
         for record in emparejados {
@@ -254,7 +296,7 @@ impl HostDeProducto {
                 url: server.url.clone(),
                 device: host.info.clone(),
                 enrollment_token: Some(TOKEN.to_owned()),
-                monitors: Self::layout(),
+                monitors: pantalla.clone().unwrap_or_else(Self::layout),
                 udp_port: 0,
                 public_endpoint: None,
                 shared_roots: carpetas,
@@ -264,6 +306,11 @@ impl HostDeProducto {
             Arc::new(inyector.clone()),
             tx,
         );
+
+        let runtime = match pantalla {
+            Some(layout) => runtime.with_capturers(Arc::new(PantallaSintetica(layout))),
+            None => runtime,
+        };
 
         let tarea = tokio::spawn(async move {
             runtime
@@ -401,4 +448,23 @@ pub async fn enviar_candidato(
     )
     .await
     .expect("envia camino");
+}
+
+/// Pantalla de prueba para las sesiones completas.
+///
+/// **No es captura.** Entrega fotogramas de color plano del tamano que el host
+/// declara, porque capturar de verdad solo funciona en Windows. Lo que si
+/// ejercita es todo lo que viene despues —escalar, codificar en H.264, trocear
+/// en paquetes RTP, cifrar y entregar—, que es exactamente la parte que no se
+/// podria probar de ninguna otra forma en esta maquina.
+pub struct PantallaSintetica(pub nexus_core::monitor::MonitorLayout);
+
+impl nexus_windows_host::screen::CapturerSource for PantallaSintetica {
+    fn create(
+        &self,
+    ) -> Result<Box<dyn nexus_capture::ScreenCapturer>, nexus_capture::error::CaptureError> {
+        Ok(Box::new(nexus_capture::SyntheticCapturer::new(
+            self.0.clone(),
+        )))
+    }
 }

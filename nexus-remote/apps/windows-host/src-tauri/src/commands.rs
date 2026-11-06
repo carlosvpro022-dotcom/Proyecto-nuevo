@@ -490,12 +490,13 @@ fn funciones_avanzadas() -> Vec<FeatureStatus> {
         FeatureStatus {
             key: "video",
             label: "Transmision de la pantalla al dispositivo",
-            // Sigue pendiente, y no se adelanta: la pista negocia y entrega
-            // lo que se escribe en ella, probado entre dos extremos reales,
-            // pero sin codificador no hay nada que escribir.
-            state: Pending,
+            // Ya no esta pendiente: esta implementada y ejecutada. Tampoco es
+            // "probada", porque lo que se ejecuto aqui no tiene los dos
+            // extremos de verdad: los pixeles son sinteticos y no hay todavia
+            // un dispositivo que los muestre.
+            state: Unverified,
             stage: 5,
-            detail: "Codificar y transmitir ya funciona: una pantalla se codifica en H.264, viaja por la pista cifrada, se recompone al otro lado y se ve. Probado de punta a punta con imagenes generadas. Falta unirlo a la captura de Windows, que es lo unico que no se puede ejecutar fuera de Windows, y el cliente que lo muestre.",
+            detail: "La cadena completa funciona dentro de una sesion del producto: el host comprueba quien hay al otro lado, atiende la peticion de pantalla, escala, codifica en H.264, trocea en RTP y lo cifra; al otro lado se recompone y se decodifica una imagen. Cambiar la calidad en caliente cambia lo que llega. Falta ejecutarlo en un PC con Windows, donde los pixeles vienen de la pantalla de verdad y no de un capturador sintetico, y falta el cliente que la muestre.",
         },
         FeatureStatus {
             key: "audio",

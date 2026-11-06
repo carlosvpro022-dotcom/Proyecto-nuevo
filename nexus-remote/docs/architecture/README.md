@@ -22,3 +22,4 @@ de otra manera**, que es lo que se pierde con el tiempo.
 | [0011](ADR-0011-directorio-de-identidades.md) | El servidor conoce identidades, no permisos | Aceptada |
 | [0012](ADR-0012-transferencia-de-archivos.md) | Los archivos van por su propio canal binario y el destino se publica verificado | Aceptada |
 | [0013](ADR-0013-confirmacion-en-el-host.md) | El token de confirmación nace sin validez: solo vale si una persona lo aprueba en el PC | Aceptada |
+| [0014](ADR-0014-bombeo-de-pantalla.md) | La pantalla se pide, se bombea en su propio hilo y nunca se tira un fotograma | Aceptada |

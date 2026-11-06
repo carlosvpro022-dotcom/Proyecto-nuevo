@@ -153,8 +153,11 @@ que este proyecto no mezcla.
 
 Aunque todo lo anterior salga bien:
 
-- **La transmisión de pantalla**, porque todavía no hay codificador ni nada al
-  otro lado que la reciba.
+- **Ver la pantalla desde otro dispositivo**, porque no hay todavía un cliente
+  que la muestre. Lo que sí se puede probar en el PC es el primer tramo: que la
+  captura enumera sus pantallas y entrega fotogramas (paso 1). Codificar y
+  transmitir ya está probado aquí de punta a punta, pero con píxeles
+  sintéticos.
 - **El ratón y el teclado de verdad**, por lo mismo: hacen falta los dos
   extremos.
 - **Apagar y reiniciar.** El paso 2 comprueba que la cuenta *podría*; probarlo

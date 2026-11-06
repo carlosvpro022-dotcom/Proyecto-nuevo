@@ -29,9 +29,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nexus_core::monitor::MonitorLayout;
+use nexus_core::protocol::control::HostEvent;
 use nexus_core::protocol::signaling::{ClientToServer, ServerToClient};
 use nexus_core::{
-    CapabilitySet, CloseReason, DeviceId, DeviceInfo, PermissionSet, SessionId, Timestamp,
+    CapabilitySet, CloseReason, DeviceId, DeviceInfo, Permission, PermissionSet, QualityProfile,
+    SessionId, Timestamp,
 };
 use nexus_file_transfer::{AccessPolicy, Frame, SharedRoot};
 use nexus_input::InputInjector;
@@ -40,7 +42,7 @@ use nexus_security::{AuthRole, BindingProof, DeviceIdentity, DevicePublicKey, Se
 use nexus_transport::client::{ConnectRequest, SignalingClient};
 use nexus_transport::peer::{
     CONTROL_CHANNEL, FILES_CHANNEL, INPUT_CHANNEL, LinkPhase, NetworkOptions, PeerEvent, PeerRole,
-    PeerSender, PeerSession, resolve_public_ip,
+    PeerSender, PeerSession, ScreenSender, resolve_public_ip,
 };
 use nexus_transport::{LinkEvent, LinkState, SignalingLink, TransportError};
 use tokio::sync::mpsc;
@@ -48,6 +50,7 @@ use tokio::sync::mpsc;
 use crate::admission::{self, Decision};
 use crate::confirmation::SharedConfirmations;
 use crate::files::{Download, TransferOutcome, TransferReport};
+use crate::screen::{CapturerSource, PlatformCapturers, ScreenCommand, ScreenOutput};
 use crate::session::SessionHandler;
 
 /// Datos con los que arranca el bucle.
@@ -173,6 +176,15 @@ pub const BINDING_TIMEOUT: Duration = Duration::from_secs(30);
 /// saltos. El informe final no se pierde nunca, porque ese si espera sitio.
 const REPORT_QUEUE_DEPTH: usize = 64;
 
+/// Fotogramas que caben en la cola entre la captura y el envio.
+///
+/// Corta a proposito: una cola de fotogramas es retraso acumulado, y en una
+/// pantalla remota el retraso se nota mas que un tiron. Con dos, el hilo de
+/// captura se para en cuanto el envio se atrasa, que es exactamente lo que
+/// tiene que pasar; ninguno se tira, porque tirar uno estropearia los
+/// siguientes.
+const FRAME_QUEUE_DEPTH: usize = 2;
+
 /// El bucle del host.
 pub struct HostRuntime {
     config: RuntimeConfig,
@@ -185,6 +197,8 @@ pub struct HostRuntime {
     /// Sin compartirla, una sesion podria pedir confirmacion para apagar y
     /// nadie tendria donde aprobarla.
     confirmations: SharedConfirmations,
+    /// De donde sale el capturador de pantalla de cada sesion.
+    capturers: Arc<dyn CapturerSource>,
     link: SignalingLink,
 }
 
@@ -214,6 +228,7 @@ impl HostRuntime {
             injectors,
             events,
             confirmations: SharedConfirmations::new(),
+            capturers: Arc::new(PlatformCapturers),
             link: SignalingLink::new(),
         }
     }
@@ -222,6 +237,17 @@ impl HostRuntime {
     #[must_use]
     pub fn with_confirmations(mut self, confirmations: SharedConfirmations) -> Self {
         self.confirmations = confirmations;
+        self
+    }
+
+    /// Cambia de donde sale el capturador de pantalla.
+    ///
+    /// Por omision es el de la plataforma. Las pruebas de extremo a extremo
+    /// ponen aqui un capturador sintetico, que no es captura real pero recorre
+    /// el mismo camino: codificar, trocear en RTP y llegar al otro lado.
+    #[must_use]
+    pub fn with_capturers(mut self, capturers: Arc<dyn CapturerSource>) -> Self {
+        self.capturers = capturers;
         self
     }
 
@@ -457,6 +483,10 @@ impl HostRuntime {
         // precio aceptable por no frenar el envio.
         let (reportes, mut recibe_reportes) = mpsc::channel::<TransferReport>(REPORT_QUEUE_DEPTH);
         let mut envios = tokio::task::JoinSet::new();
+        // La pista de video existe desde que se abre la conexion, pero no sale
+        // nada por ella hasta que el bombeo arranca, y el bombeo no arranca
+        // hasta que se sabe quien hay al otro lado.
+        let mut bombeo: Option<Bombeo> = None;
         let limite = tokio::time::sleep(BINDING_TIMEOUT);
         tokio::pin!(limite);
 
@@ -515,42 +545,30 @@ impl HostRuntime {
             // congelado hasta terminar.
             arrancar_descargas(&peer, handler.as_mut(), &reportes, &mut envios);
 
+            // La pantalla arranca cuando la sesion la pide, no antes (ver
+            // `ControlRequest::StartScreen`). Y solo se puede pedir por el
+            // canal de control, que solo se atiende con la atadura comprobada:
+            // por eso esto no es una segunda puerta, es la misma.
+            if bombeo.is_none()
+                && let Some(handler) = handler.as_ref()
+                && handler.screen_requests() > 0
+            {
+                bombeo = self.start_screen(handler, &permissions, &peer);
+            }
+            sincronizar_pantalla(bombeo.as_mut(), handler.as_ref());
+
             // La atadura se comprueba en cuanto se tienen las dos piezas, y es
             // lo unico que da paso al manejador.
-            if handler.is_none()
-                && let Some(verificada) = estado.verify(peer_key)
-            {
-                if !verificada {
-                    break (
-                        CloseReason::AuthenticationFailed,
-                        "la atadura de sesion no cuadra: posible interceptacion",
-                    );
+            if handler.is_none() {
+                match self.autorizar(&estado, peer_key, &permissions).await {
+                    Ok(Some(nuevo)) => handler = Some(nuevo),
+                    Ok(None) => {}
+                    Err(motivo) => break motivo,
                 }
-                handler = Some(
-                    SessionHandler::new(
-                        permissions.clone(),
-                        self.config.monitors.clone(),
-                        self.injectors.create(),
-                    )
-                    .with_shared_folders(AccessPolicy::new(self.config.shared_roots.clone()))
-                    .with_confirmations(self.confirmations.clone()),
-                );
-                self.emit(RuntimeEvent::SessionStarted {
-                    session_id,
-                    controller: controller.id,
-                    permissions: permissions.clone(),
-                })
-                .await;
             }
         };
 
-        // Primero las transferencias: las subidas a medias tienen que borrar
-        // su archivo temporal antes de que la sesion desaparezca, y las tareas
-        // de envio tienen que parar antes de cerrar la conexion.
-        if let Some(handler) = handler.as_mut() {
-            handler.end();
-        }
-        envios.shutdown().await;
+        cerrar_trabajos(handler.as_mut(), &mut envios, bombeo.take()).await;
 
         let counts = recuento(handler.as_ref());
         self.end_session(session_id, estado.dropped, counts, motivo)
@@ -558,6 +576,112 @@ impl HostRuntime {
         let _ = sig.send(ClientToServer::Bye { session_id }).await;
         let _ = peer.close().await;
         Ok(())
+    }
+
+    /// Comprueba la atadura y, si cuadra, monta lo que la sesion necesita.
+    ///
+    /// Devuelve `Ok(None)` mientras falte alguna de las dos piezas (la huella
+    /// del canal cifrado y la firma del otro extremo). Devuelve `Err` cuando
+    /// no cuadran: eso no es un retraso, es alguien en medio.
+    ///
+    /// Es el unico sitio donde nace el manejador, y por tanto el unico sitio
+    /// desde el que se puede empezar a mover el raton. La pantalla necesita
+    /// ademas que la sesion la pida, asi que arranca aparte, en el bucle.
+    async fn autorizar(
+        &self,
+        estado: &SessionState,
+        peer_key: &DevicePublicKey,
+        permissions: &PermissionSet,
+    ) -> Result<Option<SessionHandler>, Motivo> {
+        let Some(verificada) = estado.verify(peer_key) else {
+            return Ok(None);
+        };
+        if !verificada {
+            return Err((
+                CloseReason::AuthenticationFailed,
+                "la atadura de sesion no cuadra: posible interceptacion",
+            ));
+        }
+
+        let handler = SessionHandler::new(
+            permissions.clone(),
+            self.config.monitors.clone(),
+            self.injectors.create(),
+        )
+        .with_shared_folders(AccessPolicy::new(self.config.shared_roots.clone()))
+        .with_confirmations(self.confirmations.clone());
+
+        self.emit(RuntimeEvent::SessionStarted {
+            session_id: estado.session_id,
+            controller: estado.controller,
+            permissions: permissions.clone(),
+        })
+        .await;
+
+        Ok(Some(handler))
+    }
+
+    /// Pone en marcha el envio de la pantalla de una sesion ya autenticada.
+    ///
+    /// Devuelve `None` cuando no hay nada que enviar: el dispositivo no tiene
+    /// permiso para ver la pantalla, no hay pista de video por la que enviarla,
+    /// o el sistema no deja crear el hilo. En ninguno de los tres casos se
+    /// corta la sesion: el teclado, el raton y las transferencias no dependen
+    /// de esto.
+    fn start_screen(
+        &self,
+        handler: &SessionHandler,
+        permissions: &PermissionSet,
+        peer: &PeerSession,
+    ) -> Option<Bombeo> {
+        if !permissions.has(Permission::ViewScreen) {
+            tracing::info!("la sesion no puede ver la pantalla: no se captura nada");
+            return None;
+        }
+        let Some(pista) = peer.screen() else {
+            // Solo el que abre la conexion tiene pista, y en este producto el
+            // que abre es siempre el host. Sin pista, capturar seria gastar
+            // CPU para tirar el resultado.
+            tracing::warn!("no hay pista de video: no se captura nada");
+            return None;
+        };
+
+        let visto = (handler.quality(), handler.active_monitor());
+        let (ordenes, recibe_ordenes) = std::sync::mpsc::channel();
+        let (fotogramas, recibe_fotogramas) = mpsc::channel::<ScreenOutput>(FRAME_QUEUE_DEPTH);
+        let fuente = Arc::clone(&self.capturers);
+        let envia = fotogramas;
+        let (perfil, monitor) = visto;
+
+        // El reenvio va en su propia tarea y no en el bucle de la sesion. Si
+        // estuviera en el bucle, un envio lento por la pista de video dejaria
+        // de atender la senalizacion, el teclado y las transferencias: la
+        // pantalla no puede congelar el raton.
+        let reenvio = tokio::spawn(reenviar_pantalla(peer.sender(), pista, recibe_fotogramas));
+
+        // Un hilo propio y no el grupo de bloqueo de tokio: esto no es una
+        // tarea que acabe, es un trabajo que dura toda la sesion y tendria
+        // ocupado un hilo del grupo de todas formas.
+        let hilo = std::thread::Builder::new()
+            .name("nexus-pantalla".to_owned())
+            .spawn(move || {
+                crate::screen::serve(fuente.as_ref(), monitor, &perfil, &recibe_ordenes, &envia);
+            });
+
+        match hilo {
+            Ok(hilo) => Some(Bombeo {
+                ordenes,
+                hilo,
+                reenvio,
+                peticiones: handler.screen_requests(),
+                visto,
+            }),
+            Err(error) => {
+                tracing::error!(%error, "no se pudo crear el hilo de captura");
+                reenvio.abort();
+                None
+            }
+        }
     }
 
     /// Un mensaje de senalizacion dentro de una sesion.
@@ -729,6 +853,145 @@ impl HostRuntime {
 
 /// Por que termino una sesion: motivo para el historial y texto para la persona.
 type Motivo = (CloseReason, &'static str);
+
+/// Pide al hilo de captura lo que la sesion haya cambiado por el control.
+///
+/// Cambiar de calidad o de monitor lo tiene que aplicar el hilo que captura,
+/// porque es el unico que puede tocar el capturador y el codificador.
+fn sincronizar_pantalla(bombeo: Option<&mut Bombeo>, handler: Option<&SessionHandler>) {
+    if let Some(bombeo) = bombeo
+        && let Some(handler) = handler
+    {
+        bombeo.sincronizar(handler);
+    }
+}
+
+/// Para todo lo que la sesion tenia en marcha, en el orden que importa.
+///
+/// El orden no es decorativo:
+///
+/// 1. Las subidas a medias tienen que borrar su archivo temporal antes de que
+///    la sesion desaparezca.
+/// 2. Las tareas de envio tienen que parar antes de cerrar la conexion.
+/// 3. El bombeo se para al final, con su propio orden interno (ver
+///    [`Bombeo::parar`]).
+async fn cerrar_trabajos(
+    handler: Option<&mut SessionHandler>,
+    envios: &mut tokio::task::JoinSet<()>,
+    bombeo: Option<Bombeo>,
+) {
+    if let Some(handler) = handler {
+        handler.end();
+    }
+    envios.shutdown().await;
+    if let Some(bombeo) = bombeo {
+        bombeo.parar().await;
+    }
+}
+
+/// El envio de la pantalla de una sesion, visto desde el bucle.
+struct Bombeo {
+    /// Por donde se le piden cambios al hilo que captura.
+    ordenes: std::sync::mpsc::Sender<ScreenCommand>,
+    /// El hilo que captura.
+    hilo: std::thread::JoinHandle<()>,
+    /// La tarea que saca los fotogramas por la pista de video.
+    reenvio: tokio::task::JoinHandle<()>,
+    /// Peticiones de pantalla ya atendidas.
+    ///
+    /// Pedirla otra vez con la pantalla en marcha significa "he perdido el
+    /// hilo": lo que hace falta es un fotograma completo.
+    peticiones: u64,
+    /// Calidad y monitor que el bombeo ya conoce.
+    ///
+    /// Sin esto habria que repetirle la orden en cada vuelta del bucle, y cada
+    /// cambio de calidad rehace el codificador y obliga a un fotograma
+    /// completo: repetirlo sin motivo se veria como un parpadeo.
+    visto: (QualityProfile, u8),
+}
+
+impl Bombeo {
+    /// Pone al hilo de captura al dia con lo que la sesion pidio.
+    fn sincronizar(&mut self, handler: &SessionHandler) {
+        if handler.screen_requests() > self.peticiones {
+            self.peticiones = handler.screen_requests();
+            let _ = self.ordenes.send(ScreenCommand::Keyframe);
+        }
+
+        let ahora = (handler.quality(), handler.active_monitor());
+        if ahora.0 != self.visto.0 {
+            let _ = self.ordenes.send(ScreenCommand::Quality(ahora.0));
+        }
+        if ahora.1 != self.visto.1 {
+            let _ = self.ordenes.send(ScreenCommand::Monitor(ahora.1));
+        }
+        self.visto = ahora;
+    }
+
+    /// Para el bombeo y espera a que todo lo suyo termine.
+    ///
+    /// El orden importa: primero se corta el reenvio, porque eso suelta la
+    /// cola de fotogramas y desbloquea al hilo de captura si estuviera
+    /// esperando sitio; si se hiciera al contrario, esperar al hilo podria no
+    /// terminar nunca. Soltar el extremo de ordenes es la senal de parada, y
+    /// la espera por el hilo va al grupo de bloqueo porque puede estar a mitad
+    /// de codificar un fotograma.
+    async fn parar(self) {
+        self.reenvio.abort();
+        let _ = self.reenvio.await;
+        drop(self.ordenes);
+        let _ = tokio::task::spawn_blocking(move || self.hilo.join()).await;
+    }
+}
+
+/// Saca por la pista de video lo que va produciendo el hilo de captura.
+///
+/// Vive en su propia tarea a proposito: `send_frame` puede tardar lo que tarde
+/// la red, y esa espera no puede caer sobre el bucle de la sesion, que es
+/// quien atiende la senalizacion, el teclado y las transferencias.
+///
+/// Termina cuando el hilo de captura suelta su extremo, que es lo que ocurre
+/// tanto al acabar la sesion como al romperse la captura.
+async fn reenviar_pantalla(
+    salida: PeerSender,
+    pista: Arc<ScreenSender>,
+    mut fotogramas: mpsc::Receiver<ScreenOutput>,
+) {
+    while let Some(cosa) = fotogramas.recv().await {
+        match cosa {
+            ScreenOutput::Frame {
+                data,
+                duration,
+                keyframe,
+            } => {
+                if let Err(error) = pista.send_frame(&data, duration).await {
+                    tracing::warn!(%error, keyframe, "no se pudo enviar un fotograma");
+                }
+            }
+            ScreenOutput::Refused { detail } => {
+                tracing::warn!(detail, "el hilo de captura no pudo aplicar una orden");
+            }
+            ScreenOutput::Broken { detail } => {
+                tracing::error!(detail, "se dejo de enviar la pantalla");
+                avisar_pantalla_parada(&salida, detail).await;
+            }
+        }
+    }
+}
+
+/// Dice al otro extremo que la pantalla dejo de llegar, y por que.
+///
+/// Sin esto, la imagen se quedaria congelada y pareceria un problema de red.
+async fn avisar_pantalla_parada(salida: &PeerSender, reason: String) {
+    match SessionHandler::event(HostEvent::ScreenStopped { reason }) {
+        Ok(aviso) => {
+            if let Err(error) = salida.send(CONTROL_CHANNEL, aviso.as_bytes()).await {
+                tracing::warn!(%error, "no se pudo avisar de que la pantalla paro");
+            }
+        }
+        Err(error) => tracing::error!(%error, "no se pudo codificar el aviso de pantalla"),
+    }
+}
 
 /// Ordenes aplicadas y rechazadas, o ceros si la sesion nunca llego a abrirse.
 /// Envia por el canal de control el progreso que cuente una tarea de envio.

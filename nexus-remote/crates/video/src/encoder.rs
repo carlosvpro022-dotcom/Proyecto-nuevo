@@ -100,6 +100,21 @@ impl std::fmt::Debug for OpenH264Encoder {
     }
 }
 
+/// Hilos que se le dejan a la biblioteca para codificar.
+///
+/// La mitad de los nucleos, nunca mas de cuatro y nunca menos de uno.
+///
+/// El motivo no es el rendimiento del codificador, es el del PC: este programa
+/// corre en el ordenador de alguien, que puede estar usandolo o teniendolo
+/// ocupado en otra cosa. Dejarle la maquina entera al video haria que la sesion
+/// remota estropease justo lo que viene a controlar. Por arriba se corta en
+/// cuatro porque a partir de ahi openh264 reparte el fotograma en mas trozos
+/// (`slices`) y eso comprime algo peor sin ir mucho mas rapido.
+fn encoding_threads() -> u16 {
+    let nucleos = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    u16::try_from(nucleos / 2).unwrap_or(u16::MAX).clamp(1, 4)
+}
+
 impl OpenH264Encoder {
     /// Prepara el codificador para una pantalla y un perfil de calidad.
     ///
@@ -144,6 +159,11 @@ impl OpenH264Encoder {
             // la eleccion sea explicita y el registro no se llene de avisos.
             .adaptive_quantization(false)
             .background_detection(false)
+            // Cuantos hilos usa la biblioteca para codificar. Esto **hay que
+            // decirlo**: sin decirlo, openh264 coge todos los nucleos que
+            // encuentra, y un escritorio remoto que acapara el PC entero es lo
+            // contrario de lo que se quiere.
+            .num_threads(encoding_threads())
             .intra_frame_period(IntraFramePeriod::from_num_frames(
                 u32::from(profile.target_fps).saturating_mul(4).max(1),
             ));
@@ -432,5 +452,32 @@ mod tests {
             OpenH264Encoder::new(0, 1080, &perfil_sin_escala()).unwrap_err(),
             VideoError::BadDimensions { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod hilos {
+    use super::encoding_threads;
+
+    #[test]
+    fn el_codificador_nunca_se_queda_con_la_maquina_entera() {
+        let nucleos = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let hilos = usize::from(encoding_threads());
+
+        assert!(
+            hilos >= 1,
+            "con cero hilos la biblioteca elige por su cuenta"
+        );
+        assert!(
+            hilos <= 4,
+            "mas de cuatro trozos por fotograma comprime peor sin ir mas rapido"
+        );
+        if nucleos > 1 {
+            assert!(
+                hilos <= nucleos / 2,
+                "en una maquina de {nucleos} nucleos, {hilos} hilos dejan el PC \
+                 sin margen para lo que la persona este haciendo"
+            );
+        }
     }
 }

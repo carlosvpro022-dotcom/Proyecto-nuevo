@@ -127,6 +127,12 @@ fn guion(c: &Carpetas) -> Vec<(&'static str, ControlRequest, Forma)> {
 /// Lo que se puede pedir sobre la pantalla.
 fn pantalla_y_calidad() -> Vec<(&'static str, ControlRequest, Forma)> {
     vec![
+        ("pedir la pantalla", ControlRequest::StartScreen, Forma::Ack),
+        (
+            "pedir la pantalla otra vez",
+            ControlRequest::StartScreen,
+            Forma::Ack,
+        ),
         (
             "listar monitores",
             ControlRequest::ListMonitors,

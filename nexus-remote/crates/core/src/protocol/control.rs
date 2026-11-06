@@ -133,6 +133,18 @@ pub enum ControlRequest {
         /// Evento concreto.
         event: InputEvent,
     },
+    /// Pide al host que empiece a enviar la pantalla.
+    ///
+    /// La pantalla no se empuja: se pide. El motivo es sencillo: quien va a
+    /// mostrar la imagen es el unico que sabe cuando esta listo para mostrarla,
+    /// y hasta entonces el host estaria escalando y codificando fotogramas que
+    /// no se ven. Capturar y codificar es, con diferencia, lo mas caro que hace
+    /// el host, y corre en el ordenador de alguien.
+    ///
+    /// Pedirla otra vez con la pantalla ya en marcha no es un error: significa
+    /// "he perdido el hilo, mandame un fotograma completo", que es lo que hace
+    /// falta tras una perdida de paquetes larga.
+    StartScreen,
     /// Pide la lista de monitores.
     ListMonitors,
     /// Cambia el monitor transmitido.
@@ -218,9 +230,10 @@ impl ControlRequest {
                     Permission::ControlPointer
                 }
             }
-            Self::ListMonitors | Self::SelectMonitor { .. } | Self::SetQuality { .. } => {
-                Permission::ViewScreen
-            }
+            Self::StartScreen
+            | Self::ListMonitors
+            | Self::SelectMonitor { .. }
+            | Self::SetQuality { .. } => Permission::ViewScreen,
             Self::ClipboardGet => Permission::ClipboardRead,
             Self::ClipboardSet { .. } => Permission::ClipboardWrite,
             Self::ListDir { .. } | Self::DownloadStart { .. } => Permission::FileRead,
@@ -363,6 +376,19 @@ pub enum HostEvent {
     SessionLockChanged {
         /// Si quedo bloqueada.
         locked: bool,
+    },
+    /// El host dejo de enviar la pantalla.
+    ///
+    /// Es un evento y no una respuesta porque no contesta a ninguna peticion:
+    /// la captura se rompe por su cuenta, sin que nadie haya pedido nada.
+    ///
+    /// La sesion **no** termina: el teclado, el raton, el portapapeles y las
+    /// transferencias siguen funcionando. Lo que no puede pasar es que el otro
+    /// extremo se quede mirando una imagen congelada sin saber por que, asi
+    /// que se dice.
+    ScreenStopped {
+        /// Motivo legible.
+        reason: String,
     },
     /// El host va a cerrar la sesion.
     Closing {

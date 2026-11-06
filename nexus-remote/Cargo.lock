@@ -2738,6 +2738,7 @@ dependencies = [
  "nexus-power",
  "nexus-security",
  "nexus-transport",
+ "nexus-video",
  "rusqlite",
  "serde",
  "serde_json",

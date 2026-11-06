@@ -47,6 +47,12 @@ pub struct SessionHandler {
     active_monitor: u8,
     injector: Box<dyn InputInjector + Send>,
     quality: QualityProfile,
+    /// Cuantas veces se ha pedido la pantalla en esta sesion.
+    ///
+    /// Es una cuenta y no un `bool` porque la segunda peticion tambien
+    /// significa algo: quien la hace perdio el hilo y necesita un fotograma
+    /// completo.
+    screen_requests: u64,
     clipboard: Box<dyn Clipboard>,
     power: Box<dyn PowerControl>,
     confirmations: SharedConfirmations,
@@ -102,6 +108,7 @@ impl SessionHandler {
             active_monitor,
             injector,
             quality: QualityProfile::from_preset(QualityPreset::Equilibrado),
+            screen_requests: 0,
             clipboard: default_clipboard(),
             power: default_power(),
             confirmations: SharedConfirmations::default(),
@@ -203,11 +210,20 @@ impl SessionHandler {
 
     /// Perfil de calidad en uso.
     ///
-    /// Lo pide el dispositivo y el host lo valida. Hoy solo se guarda: lo
-    /// aplicara la transmision de pantalla cuando exista.
+    /// Lo pide el dispositivo y el host lo valida. El bucle de la sesion lo
+    /// consulta para poner al dia al hilo que captura.
     #[must_use]
     pub const fn quality(&self) -> QualityProfile {
         self.quality
+    }
+
+    /// Cuantas veces ha pedido esta sesion la pantalla.
+    ///
+    /// Cero significa que todavia no la ha pedido, y por tanto que no se
+    /// captura nada.
+    #[must_use]
+    pub const fn screen_requests(&self) -> u64 {
+        self.screen_requests
     }
 
     /// Monitor que se esta transmitiendo.
@@ -287,6 +303,12 @@ impl SessionHandler {
                     layout: self.monitors.clone(),
                 })
                 .map(Some)
+            }
+            // El permiso ya se comprobo arriba, para todas por igual.
+            ControlRequest::StartScreen => {
+                self.screen_requests = self.screen_requests.saturating_add(1);
+                self.applied = self.applied.saturating_add(1);
+                self.respond(ControlResponse::Ack).map(Some)
             }
             ControlRequest::SelectMonitor { index } => {
                 if self.monitors.0.iter().any(|m| m.index == index) {
@@ -591,7 +613,16 @@ impl SessionHandler {
         self.deny(deny_code(error), &deny_message(error))
     }
 
-    fn event(event: HostEvent) -> HostResult<String> {
+    /// Codifica un aviso del host para el canal de control.
+    ///
+    /// Es publica porque hay avisos que no nacen de una peticion ni los
+    /// descubre el manejador: la captura de pantalla se rompe en su propio
+    /// hilo, y quien se entera es el bucle de la sesion.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Protocol`] si el aviso no se puede codificar.
+    pub fn event(event: HostEvent) -> HostResult<String> {
         Envelope::at(Timestamp::now(), ControlMessage::Event(event))
             .encode()
             .map_err(|e| HostError::Protocol(e.to_string()))

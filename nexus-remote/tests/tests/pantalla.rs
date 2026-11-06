@@ -8,15 +8,15 @@
 //! DTLS-SRTP y entrega. Todo eso es trabajo de la biblioteca y de la
 //! configuracion, y hasta ahora nadie lo habia ejecutado en este proyecto.
 //!
-//! **No prueba la transmision de pantalla.** Faltan las dos puntas: capturar
-//! la pantalla, que solo funciona en Windows, y codificar los fotogramas, que
-//! todavia no esta hecho. Lo que viaja aqui son bytes con la forma de una
-//! unidad H.264, no una imagen.
+//! La primera prueba manda bytes con la forma de una unidad H.264, no una
+//! imagen: lo que demuestra es que **el camino funciona**, que es lo que habia
+//! que averiguar antes de construir encima. La segunda ya codifica pantallas
+//! de verdad con el codificador del producto y las decodifica al otro lado.
 //!
-//! Esa distincion importa y no se difumina. Lo que esta prueba demuestra es
-//! que **el camino por el que viajara la pantalla funciona**, que es lo que
-//! habia que averiguar antes de construir encima: si la pista no negociara o
-//! los paquetes no llegaran, el codificador no serviria de nada.
+//! **Lo que ninguna de las dos prueba es la captura**, que solo funciona en
+//! Windows. Esa distincion no se difumina. La sesion completa, con el bucle
+//! del host moviendo el hilo de captura por su cuenta, se prueba aparte en
+//! `pantalla_en_sesion`.
 
 use std::time::Duration;
 
