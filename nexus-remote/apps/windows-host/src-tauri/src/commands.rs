@@ -495,7 +495,7 @@ fn funciones_avanzadas() -> Vec<FeatureStatus> {
             // pero sin codificador no hay nada que escribir.
             state: Pending,
             stage: 5,
-            detail: "El camino ya funciona: la pista de video negocia H.264 y lo que se escribe en ella llega al otro extremo, comprobado entre dos conexiones reales. Falta el codificador que convierta los fotogramas capturados en algo que escribir.",
+            detail: "Codificar y transmitir ya funciona: una pantalla se codifica en H.264, viaja por la pista cifrada, se recompone al otro lado y se ve. Probado de punta a punta con imagenes generadas. Falta unirlo a la captura de Windows, que es lo unico que no se puede ejecutar fuera de Windows, y el cliente que lo muestre.",
         },
         FeatureStatus {
             key: "audio",

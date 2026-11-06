@@ -1,0 +1,14 @@
+[package]
+name = "nexus-video"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nexus-capture = { version = "0.1.0", path = "../capture" }
+nexus-core = { version = "0.1.0", path = "../core" }
+openh264 = "0.9.9"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+
+[lints]
+workspace = true

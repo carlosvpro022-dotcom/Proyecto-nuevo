@@ -22,6 +22,9 @@ use std::time::Duration;
 
 use nexus_transport::ice::IceConfiguration;
 use nexus_transport::peer::{LinkPhase, NetworkOptions, PeerEvent, PeerRole, PeerSession};
+use nexus_video::Encoder as _;
+use openh264::formats::YUVSource as _;
+use rtc::rtp::packetizer::Depacketizer as _;
 
 /// Tope de la prueba. ICE y DTLS tardan, pero no tanto.
 const TIMEOUT: Duration = Duration::from_secs(45);
@@ -197,6 +200,231 @@ async fn un_fotograma_escrito_en_la_pista_llega_al_otro_extremo() {
                 "el fotograma {i} tiene que llegar tal cual"
             );
         }
+
+        let _ = host.close().await;
+        let _ = ipad.close().await;
+    };
+
+    tokio::time::timeout(TIMEOUT, prueba)
+        .await
+        .expect("la prueba no deberia agotar el tiempo");
+}
+
+// ---------------------------------------------------------------------------
+// La cadena completa: codificar, enviar, recibir, decodificar.
+// ---------------------------------------------------------------------------
+
+/// Una imagen con aspecto de pantalla: barra arriba y bloques como texto.
+fn captura(desplazamiento: u32) -> nexus_capture::frame::Frame {
+    const ANCHO: u32 = 320;
+    const ALTO: u32 = 240;
+    let stride = ANCHO as usize * 4;
+    let mut data = vec![0_u8; stride * ALTO as usize];
+    for y in 0..ALTO {
+        for x in 0..ANCHO {
+            let barra = y < 24;
+            let bloque = (x + desplazamiento) % 64 < 20 && y > 60 && y < 180;
+            let color: [u8; 4] = if barra {
+                [60, 50, 45, 255]
+            } else if bloque {
+                [30, 30, 30, 255]
+            } else {
+                [245, 245, 240, 255]
+            };
+            let p = y as usize * stride + x as usize * 4;
+            data[p..p + 4].copy_from_slice(&color);
+        }
+    }
+    nexus_capture::frame::Frame {
+        width: ANCHO,
+        height: ALTO,
+        format: nexus_capture::frame::PixelFormat::Bgra8,
+        stride,
+        data,
+        captured_at: nexus_core::Timestamp(0),
+        monitor_index: 0,
+    }
+}
+
+/// Pasa la captura a RGB, para comparar con lo que vuelva decodificado.
+fn como_rgb(frame: &nexus_capture::frame::Frame) -> Vec<u8> {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let mut rgb = vec![0_u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let p = y * frame.stride + x * 4;
+            let d = (y * w + x) * 3;
+            rgb[d] = frame.data[p + 2];
+            rgb[d + 1] = frame.data[p + 1];
+            rgb[d + 2] = frame.data[p];
+        }
+    }
+    rgb
+}
+
+/// Diferencia media por canal entre dos imagenes RGB del mismo tamano.
+fn diferencia(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len(), "las dos imagenes tienen que medir igual");
+    let suma: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| u64::from(x.abs_diff(*y)))
+        .sum();
+    suma as f64 / a.len() as f64
+}
+
+/// Recompone los fotogramas que llegan troceados en paquetes RTP.
+///
+/// Es lo que tendra que hacer el cliente de iPhone antes de decodificar: un
+/// fotograma grande no cabe en un paquete y viaja partido, con la marca del
+/// ultimo trozo indicando donde acaba.
+#[derive(Default)]
+struct Recomponedor {
+    depacketizador: rtc::rtp::codec::h264::H264Packet,
+    actual: Vec<u8>,
+    /// Fotogramas completos, en orden.
+    completos: Vec<Vec<u8>>,
+}
+
+impl Recomponedor {
+    fn paquete(&mut self, carga: &[u8], ultimo: bool) {
+        if let Ok(trozo) = self
+            .depacketizador
+            .depacketize(&bytes::Bytes::copy_from_slice(carga))
+        {
+            self.actual.extend_from_slice(&trozo);
+        }
+        if ultimo && !self.actual.is_empty() {
+            self.completos.push(std::mem::take(&mut self.actual));
+        }
+    }
+}
+
+/// Decodifica lo que llego y lo compara con las pantallas originales.
+///
+/// H.264 pierde informacion a proposito, asi que no puede salir identico: lo
+/// que se comprueba es que lo que vuelve **se ve como** lo que entro.
+fn comprobar_que_se_ven(flujos: &[Vec<u8>], capturas: &[nexus_capture::frame::Frame]) {
+    let mut decoder = openh264::decoder::Decoder::new().expect("decodificador");
+    let mut vistos = 0;
+
+    for (i, flujo) in flujos.iter().enumerate() {
+        let Some(imagen) = decoder
+            .decode(flujo)
+            .expect("el flujo tiene que ser valido")
+        else {
+            // El decodificador puede necesitar mas de un fotograma antes de
+            // entregar el primero; lo que no puede es fallar.
+            continue;
+        };
+
+        let (w, h) = imagen.dimensions();
+        let mut rgb = vec![0_u8; w * h * 3];
+        imagen.write_rgb8(&mut rgb);
+
+        let error = diferencia(&como_rgb(&capturas[i]), &rgb);
+        assert!(
+            error < 12.0,
+            "el fotograma {i} tiene que verse como la pantalla original; \
+             diferencia media por canal: {error:.1}"
+        );
+        vistos += 1;
+    }
+
+    assert_eq!(
+        vistos,
+        capturas.len(),
+        "los tres fotogramas tienen que poder verse al otro lado"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn una_pantalla_codificada_llega_y_se_puede_ver_al_otro_lado() {
+    let prueba = async {
+        let ice = IceConfiguration::new(vec![]);
+        let red = opciones();
+
+        let mut host = PeerSession::open_with(&ice, PeerRole::Offerer, &red)
+            .await
+            .expect("el host abre la conexion");
+        let mut ipad = PeerSession::open_with(&ice, PeerRole::Answerer, &red)
+            .await
+            .expect("el dispositivo abre la conexion");
+        let pantalla = host.screen().expect("el host envia la pantalla");
+
+        negociar(&host, &ipad).await;
+
+        // El host codifica tres pantallas con el codificador de verdad.
+        let perfil = nexus_core::QualityProfile {
+            scale_percent: 100,
+            ..nexus_core::QualityProfile::from_preset(nexus_core::QualityPreset::Nitido)
+        };
+        let capturas = [captura(0), captura(24), captura(48)];
+        let mut encoder =
+            nexus_video::OpenH264Encoder::new(320, 240, &perfil).expect("prepara el codificador");
+        let codificados: Vec<Vec<u8>> = capturas
+            .iter()
+            .map(|c| {
+                encoder
+                    .encode(c)
+                    .expect("codifica")
+                    .expect("ninguna de las tres se salta")
+                    .data
+            })
+            .collect();
+
+        // --- Caminos, envio y recogida ---
+        let mut recomponedor = Recomponedor::default();
+        let mut enviados = false;
+
+        loop {
+            tokio::select! {
+                evento = host.next_event() => {
+                    match evento.expect("la conexion del host sigue viva") {
+                        PeerEvent::LocalCandidate { candidate, sdp_mid } => {
+                            ipad.add_remote_candidate(candidate, sdp_mid)
+                                .await
+                                .expect("anade el camino");
+                        }
+                        PeerEvent::Phase(LinkPhase::Connected) if !enviados => {
+                            enviados = true;
+                            for datos in &codificados {
+                                pantalla
+                                    .send_frame(datos, Duration::from_millis(33))
+                                    .await
+                                    .expect("envia el fotograma codificado");
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                evento = ipad.next_event() => {
+                    match evento.expect("la conexion del dispositivo sigue viva") {
+                        PeerEvent::LocalCandidate { candidate, sdp_mid } => {
+                            host.add_remote_candidate(candidate, sdp_mid)
+                                .await
+                                .expect("anade el camino");
+                        }
+                        PeerEvent::ScreenPacket { payload, last, .. } => {
+                            recomponedor.paquete(&payload, last);
+                            if recomponedor.completos.len() == capturas.len() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // --- Lo que tiene que haber pasado ---
+        assert_eq!(
+            recomponedor.completos.len(),
+            capturas.len(),
+            "tienen que llegar los tres fotogramas"
+        );
+
+        comprobar_que_se_ven(&recomponedor.completos, &capturas);
 
         let _ = host.close().await;
         let _ = ipad.close().await;

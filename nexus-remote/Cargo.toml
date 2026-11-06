@@ -8,6 +8,7 @@ members = [
     "crates/keyvault",
     "crates/power",
     "crates/transport",
+    "crates/video",
     "crates/security",
     "crates/file-transfer",
     "crates/audio",
@@ -30,6 +31,7 @@ publish = false
 nexus-core = { path = "crates/core" }
 nexus-security = { path = "crates/security" }
 nexus-transport = { path = "crates/transport" }
+nexus-video = { path = "crates/video" }
 nexus-capture = { path = "crates/capture" }
 nexus-clipboard = { path = "crates/clipboard" }
 nexus-input = { path = "crates/input" }
