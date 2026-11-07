@@ -2737,6 +2737,7 @@ dependencies = [
  "nexus-keyvault",
  "nexus-power",
  "nexus-security",
+ "nexus-signaling",
  "nexus-transport",
  "nexus-video",
  "rusqlite",

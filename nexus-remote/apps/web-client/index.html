@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>NEXUS REMOTE</title>
+    <style>
+      :root {
+        --fondo: #0b0d10;
+        --panel: #14181d;
+        --borde: #242a31;
+        --texto: #e6e9ec;
+        --apagado: #8b97a3;
+        --acento: #4da3ff;
+        --mal: #ff6b6b;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--fondo);
+        color: var(--texto);
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        -webkit-text-size-adjust: 100%;
+        overscroll-behavior: none;
+      }
+      #app {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+          env(safe-area-inset-left);
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--borde);
+      }
+      header strong {
+        letter-spacing: 0.08em;
+        font-size: 13px;
+      }
+      #estado {
+        color: var(--apagado);
+        font-size: 13px;
+        margin-left: auto;
+      }
+      #escenario {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 0;
+        background: #000;
+      }
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: none;
+        touch-action: none;
+      }
+      video.viva {
+        display: block;
+      }
+      #tarjeta {
+        max-width: 560px;
+        margin: 16px;
+        padding: 20px;
+        background: var(--panel);
+        border: 1px solid var(--borde);
+        border-radius: 12px;
+      }
+      h1 {
+        font-size: 17px;
+        margin: 0 0 12px;
+      }
+      p {
+        color: var(--apagado);
+        margin: 0 0 12px;
+      }
+      code {
+        display: block;
+        padding: 10px;
+        background: #0b0d10;
+        border: 1px solid var(--borde);
+        border-radius: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        word-break: break-all;
+        color: var(--texto);
+      }
+      label {
+        display: block;
+        margin: 14px 0 4px;
+        font-size: 13px;
+        color: var(--apagado);
+      }
+      input {
+        width: 100%;
+        padding: 10px;
+        background: #0b0d10;
+        border: 1px solid var(--borde);
+        border-radius: 8px;
+        color: var(--texto);
+        font: inherit;
+      }
+      button {
+        margin-top: 16px;
+        padding: 11px 18px;
+        background: var(--acento);
+        color: #061018;
+        border: 0;
+        border-radius: 8px;
+        font: inherit;
+        font-weight: 600;
+      }
+      #pasos {
+        margin: 0;
+        padding: 10px 16px;
+        max-height: 26vh;
+        overflow: auto;
+        border-top: 1px solid var(--borde);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        color: var(--apagado);
+        list-style: none;
+      }
+      #pasos li.mal {
+        color: var(--mal);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <strong>NEXUS REMOTE</strong>
+        <span id="estado">arrancando</span>
+      </header>
+      <div id="escenario">
+        <video id="pantalla" autoplay playsinline muted></video>
+        <div id="tarjeta">
+          <h1>Este navegador como dispositivo</h1>
+          <p>
+            Empareje estos datos en el PC. La clave privada se queda en este
+            navegador y no se puede leer, ni por esta propia página.
+          </p>
+          <label for="id">Identificador</label>
+          <code id="id">…</code>
+          <label for="clave">Clave pública</label>
+          <code id="clave">…</code>
+          <label for="servidor">Servidor</label>
+          <input id="servidor" placeholder="wss://su-servidor/v1/signaling" />
+          <label for="host">PC al que conectarse</label>
+          <input id="host" placeholder="identificador del PC" />
+          <button id="conectar" type="button">Conectar</button>
+        </div>
+      </div>
+      <ul id="pasos"></ul>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

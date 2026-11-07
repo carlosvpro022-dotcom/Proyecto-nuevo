@@ -1,0 +1,17 @@
+{
+  "name": "nexus-remote-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cliente web de NEXUS REMOTE: ver y controlar el PC desde un navegador",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vite": "7.1.9"
+  }
+}

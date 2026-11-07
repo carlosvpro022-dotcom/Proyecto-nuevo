@@ -709,7 +709,17 @@ impl HostRuntime {
             }
             ServerToClient::IceCandidate {
                 candidate, sdp_mid, ..
-            } => peer.add_remote_candidate(candidate, sdp_mid).await?,
+            } => {
+                // Un camino que no se puede anadir **no** tumba la sesion. El
+                // otro extremo puede mandar caminos antes de que su respuesta
+                // llegue —los navegadores lo hacen— y entonces aqui todavia no
+                // hay descripcion remota. Propagar ese error cerraba la
+                // conexion con el servidor y obligaba a reconectar, por un
+                // mensaje que solo habia que ignorar.
+                if let Err(error) = peer.add_remote_candidate(candidate, sdp_mid).await {
+                    tracing::debug!(%error, "camino descartado");
+                }
+            }
             ServerToClient::PeerAuth {
                 device_id,
                 fingerprint,

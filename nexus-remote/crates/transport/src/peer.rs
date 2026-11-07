@@ -1143,3 +1143,86 @@ mod tests {
         let _ = sesion.close().await;
     }
 }
+
+#[cfg(test)]
+mod candidatos_de_navegador {
+    use super::*;
+
+    /// Candidatos tal como los produce Chromium, con sus extensiones.
+    ///
+    /// Los de la propia biblioteca no llevan `generation`, `ufrag` ni
+    /// `network-cost`, asi que una prueba entre dos extremos de Rust nunca los
+    /// ve. Esta prueba existe porque el cliente web se queda sin imagen si el
+    /// host los descarta: sin candidato del otro extremo no hay par valido, y
+    /// sin par valido no se llega a DTLS.
+    const DE_CHROMIUM: &str = "candidate:4139675215 1 udp 2113937151 192.0.2.2 38073 typ host \
+         generation 0 ufrag LUXS network-cost 999";
+
+    /// Y asi los produce cuando esconde la IP local detras de un nombre mDNS,
+    /// que es lo que hacen por omision Chrome y Safari.
+    const CON_MDNS: &str = "candidate:1269635024 1 udp 2113937151 \
+         8a2e9139-f51c-41fd-9265-5ae07e1b8503.local 39184 typ host generation 0 ufrag 4oko \
+         network-cost 999";
+
+    fn opciones() -> NetworkOptions {
+        NetworkOptions {
+            udp_port: 0,
+            public_ip: Some("127.0.0.1".to_owned()),
+        }
+    }
+
+    fn ice() -> crate::ice::IceConfiguration {
+        crate::ice::IceConfiguration::new(vec![nexus_core::protocol::signaling::IceServer {
+            urls: vec!["stun:127.0.0.1:3478".to_owned()],
+            username: None,
+            credential: None,
+            expires_at: None,
+        }])
+    }
+
+    /// Dos extremos con la negociacion hecha, que es lo que hace falta para
+    /// que un candidato se pueda anadir.
+    async fn negociados() -> (PeerSession, PeerSession) {
+        let ice = ice();
+        let host = PeerSession::open_with(&ice, PeerRole::Offerer, &opciones())
+            .await
+            .expect("abre el host");
+        let otro = PeerSession::open_with(&ice, PeerRole::Answerer, &opciones())
+            .await
+            .expect("abre el otro extremo");
+
+        let oferta = host.create_offer().await.expect("crea la oferta");
+        let respuesta = otro.accept_offer(&oferta).await.expect("contesta");
+        host.accept_answer(&respuesta).await.expect("acepta");
+        (host, otro)
+    }
+
+    #[tokio::test]
+    async fn un_candidato_de_chromium_se_acepta() {
+        let (host, otro) = negociados().await;
+        let resultado = host
+            .add_remote_candidate(DE_CHROMIUM.to_owned(), Some("0".to_owned()))
+            .await;
+        assert!(
+            resultado.is_ok(),
+            "el host tiene que aceptar un candidato de navegador: {resultado:?}"
+        );
+        let _ = host.close().await;
+        let _ = otro.close().await;
+    }
+
+    #[tokio::test]
+    async fn un_candidato_mdns_se_acepta_o_se_explica() {
+        // Chrome y Safari esconden la IP local detras de un nombre `.local`.
+        // Si el host no puede con eso, tiene que decirlo: descartarlo en
+        // silencio deja la sesion esperando un par que no va a existir, y eso
+        // se ve como una pantalla en negro sin motivo.
+        let (host, otro) = negociados().await;
+        let resultado = host
+            .add_remote_candidate(CON_MDNS.to_owned(), Some("0".to_owned()))
+            .await;
+        println!("mDNS: {resultado:?}");
+        let _ = host.close().await;
+        let _ = otro.close().await;
+    }
+}
